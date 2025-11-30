@@ -8,7 +8,7 @@ app = func.FunctionApp()
 @app.route(route="PingApi", auth_level=func.AuthLevel.ANONYMOUS)
 def PingApi(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request.')
-
+#change for deploy test
     name = req.params.get('name')
     if not name:
         try:
