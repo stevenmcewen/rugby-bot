@@ -1,18 +1,18 @@
-# Rugby Betting Intelligence Bot
+## Rugby Betting Intelligence Bot
 
-A cloud-native machine learning system for analysing rugby match data, generating predictions, and identifying potential bookmaker mispricing.  
+A cloud-native machine learning system for analysing rugby match data and generating match predictions.  
 This project is designed as a long-term software engineering exercise, following real-world patterns, clean architecture, and Azure serverless best practices.
 
 ---
 
 ## Project Overview
 
-The Rugby Betting Intelligence Bot:
+The Rugby Intelligence Bot:
 
-- Ingests historical and live rugby data (fixtures, results, odds, weather, venue, team form).
+- Ingests historical and live rugby data (fixtures, results, and contextual information such as venue and team form).
 - Builds predictive models for match outcomes and point margins.
-- Compares predictions to bookmaker lines to detect value opportunities.
-- Sends alerts through email or API.
+- Sends regular emails summarising upcoming fixtures and the model’s predictions.
+- (Future extension) Can be enhanced to compare predictions to bookmaker lines to detect potential value opportunities.
 - Runs entirely on Azure Functions using serverless compute.
 
 The architecture is designed to be maintainable, scalable, and production-ready.
@@ -127,7 +127,7 @@ Logs visible in GitHub under Actions, and in Azure under Function App → Deploy
 
 ---
 
-# Deployment and Runtime
+## Deployment and Runtime
 
 After deployment:
 
@@ -137,7 +137,7 @@ After deployment:
 
 ---
 
-# Monitoring and Logging
+## Monitoring and Logging
 
 Application Insights provides:
 
@@ -149,30 +149,33 @@ Application Insights provides:
 
 ---
 
-# Project Structure
+## Project Structure
 
-Recommended structure as project evolves:
+Current structure:
 
 ```
 rugby-bot/
 │
-├── .github/workflows/          # CI/CD pipelines
-├── .venv/                      # Local venv (ignored in Git)
-├── host.json                   # Function runtime config
-├── local.settings.json         # Local config (not committed)
-├── requirements.txt            # Dependencies
+├── .github/workflows/              # CI/CD pipelines
+├── .venv/                          # Local venv (ignored in Git)
+├── host.json                       # Function runtime config
+├── local.settings.json             # Local config (not committed)
+├── requirements.txt                # Dependencies
+├── function_app.py                 # Azure Functions entrypoint / wiring
 │
-├── HttpTriggerSample/          # Example Azure Function
-│   ├── __init__.py
-│   └── function.json
-│
-└── rugbybot/                   # Application modules
-    ├── ingestion/
-    ├── preprocessing/
-    ├── features/
-    ├── models/
-    ├── bookmakers/
+└── functions/                      # Application modules (reusable logic)
+    ├── config/
+    │   └── settings.py             # AppSettings + get_settings()
+    ├── data_ingestion/
+    │   └── services.py             # Kaggle + Rugby365 ingestion orchestration
+    ├── data_preprocessing/
+    │   └── services.py             # Bronze → silver feature building
+    ├── logging/
+    │   └── logger.py               # get_logger() and logging helpers
+    ├── ml_models/
+    │   └── services.py             # Training and scoring logic
     ├── notifications/
-    ├── storage/
+    │   └── services.py             # Prediction summary + email sending
     └── utils/
+        └── utils.py                # Shared utilities (placeholder)
 ```
