@@ -23,23 +23,26 @@ settings = get_settings()
 sql_client = SqlClient(settings)
 
 
-@app.route(route="IngestHistoricalResults", auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="IngestHistoricalKaggleResults", auth_level=func.AuthLevel.ANONYMOUS)
 def IngestHistoricalResults(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Ingest historical results data into the database.
+    Ingest historical Kaggle results data into the database.
     """
-    logger.info("IngestHistoricalResults triggered.")
+    logger.info("IngestHistoricalKaggleResults triggered.")
 
     # Start a system event for the ingestion.
     system_event = sql_client.start_system_event(
-        function_name="IngestHistoricalResults",
+        function_name="IngestHistoricalKaggleResults",
         trigger_type="http",
         event_type="ingestion",
     )
     # Ingest the historical results.
     try:
         # Ingest the historical results.
-        ingest_historical_results(sql_client=sql_client, system_event_id=system_event.id)
+        ingest_historical_kaggle_results(
+            sql_client=sql_client,
+            system_event_id=system_event.id,
+        )
         # Complete the system event.
         sql_client.complete_system_event(
             system_event_id=system_event.id,
@@ -50,7 +53,7 @@ def IngestHistoricalResults(req: func.HttpRequest) -> func.HttpResponse:
             json.dumps(
                 {
                     "status": "ok",
-                    "message": "Historical results ingestion triggered",
+                    "message": "Historical Kaggle results ingestion triggered",
                     "system_event_id": str(system_event.id),
                 }
             ),
@@ -60,7 +63,7 @@ def IngestHistoricalResults(req: func.HttpRequest) -> func.HttpResponse:
 
     except Exception as exc:
         # Log the exception.
-        logger.exception("IngestHistoricalResults failed.")
+        logger.exception("IngestHistoricalKaggleResults failed.")
         # Complete the failed system event.
         sql_client.complete_system_event(
             system_event_id=system_event.id,
@@ -72,7 +75,7 @@ def IngestHistoricalResults(req: func.HttpRequest) -> func.HttpResponse:
             json.dumps(
                 {
                     "status": "error",
-                    "message": "Historical results ingestion failed",
+                    "message": "Historical Kaggle results ingestion failed",
                     "system_event_id": str(system_event.id),
                 }
             ),

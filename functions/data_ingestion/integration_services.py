@@ -185,6 +185,17 @@ class WriteRawSnapshotsToBlobStep:
     """
 
     def __call__(self, context: IngestionContext) -> IngestionContext:
+        # If a previous step has already marked the context as failed,
+        # skip any blob work to avoid masking the original error.
+        if context.get("status") == "failed":
+            logger.warning(
+                "Skipping blob write because ingestion context is already in a failed state "
+                "(system_event_id=%s, ingestion_event_id=%s)",
+                context.get("system_event_id"),
+                context.get("ingestion_event_id"),
+            )
+            return context
+
         logger.info(
             "Writing raw snapshots to Blob Storage (container=%s).",
             settings.raw_container_name,
