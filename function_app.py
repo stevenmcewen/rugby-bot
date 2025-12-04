@@ -2,7 +2,11 @@ import azure.functions as func
 import json
 
 from functions.config.settings import get_settings
-from functions.data_ingestion.services import ingest_rugby_data
+from functions.data_ingestion.services import (
+    ingest_historical_results,
+    ingest_rugby365_fixtures,
+    ingest_rugby365_results,
+)
 from functions.data_preprocessing.services import build_feature_tables
 from functions.logging.logger import get_logger
 from functions.ml_models.services import score_upcoming_matches, train_models
@@ -23,8 +27,7 @@ def IngestHistoricalResults(req: func.HttpRequest) -> func.HttpResponse:
     Ingest historical results data into the database.
     """
     logger.info("IngestHistoricalResults triggered.")
-    # For now just delegate to the generic rugby ingestion service.
-    ingest_rugby_data()
+    ingest_historical_results()
     return func.HttpResponse(
         json.dumps(
             {
@@ -51,7 +54,7 @@ def IngestRugby365ResultsFunction(timer: func.TimerRequest) -> None:
         logger.info("IngestRugby365ResultsFunction skipped (scheduled functions disabled).")
         return
     logger.info("IngestRugby365ResultsFunction triggered.")
-    ingest_rugby_data()
+    ingest_rugby365_results()
 
 # Ingest Rugby365 fixtures data into the database.
 @app.schedule(
@@ -68,7 +71,7 @@ def IngestRugby365FixturesFunction(timer: func.TimerRequest) -> None:
         logger.info("IngestRugby365FixturesFunction skipped (scheduled functions disabled).")
         return
     logger.info("IngestRugby365FixturesFunction triggered.")
-    ingest_rugby_data()
+    ingest_rugby365_fixtures()
 
 
 # Build feature tables from the ingested data.
