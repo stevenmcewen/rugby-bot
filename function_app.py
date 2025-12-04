@@ -2,8 +2,9 @@ import azure.functions as func
 import json
 
 from functions.config.settings import get_settings
-from functions.data_ingestion.services import (
-    ingest_historical_results,
+from functions.sql_client import SqlClient
+from functions.data_ingestion.integration_services import (
+    ingest_historical_kaggle_results,
     ingest_rugby365_fixtures,
     ingest_rugby365_results,
 )
@@ -19,6 +20,7 @@ app = func.FunctionApp()
 
 logger = get_logger(__name__)
 settings = get_settings()
+sql_client = SqlClient(settings)
 
 
 @app.route(route="IngestHistoricalResults", auth_level=func.AuthLevel.ANONYMOUS)
@@ -27,17 +29,59 @@ def IngestHistoricalResults(req: func.HttpRequest) -> func.HttpResponse:
     Ingest historical results data into the database.
     """
     logger.info("IngestHistoricalResults triggered.")
-    ingest_historical_results()
-    return func.HttpResponse(
-        json.dumps(
-            {
-                "status": "ok",
-                "message": "Historical results ingestion triggered",
-            }
-        ),
-        status_code=200,
-        mimetype="application/json",
+
+    # Start a system event for the ingestion.
+    system_event = sql_client.start_system_event(
+        function_name="IngestHistoricalResults",
+        trigger_type="http",
+        event_type="ingestion",
     )
+    # Ingest the historical results.
+    try:
+        # Ingest the historical results.
+        ingest_historical_results(sql_client=sql_client, system_event_id=system_event.id)
+        # Complete the system event.
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+        # Return a success response.
+        response = func.HttpResponse(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "message": "Historical results ingestion triggered",
+                    "system_event_id": str(system_event.id),
+                }
+            ),
+            status_code=200,
+            mimetype="application/json",
+        )
+
+    except Exception as exc:
+        # Log the exception.
+        logger.exception("IngestHistoricalResults failed.")
+        # Complete the failed system event.
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        # create a failed response.
+        response = func.HttpResponse(
+            json.dumps(
+                {
+                    "status": "error",
+                    "message": "Historical results ingestion failed",
+                    "system_event_id": str(system_event.id),
+                }
+            ),
+            status_code=500,
+            mimetype="application/json",
+        )
+    finally:
+        # Return the response.
+        return response
 
 # Ingest Rugby365 results data into the database.
 @app.schedule(
@@ -53,8 +97,29 @@ def IngestRugby365ResultsFunction(timer: func.TimerRequest) -> None:
     if not settings.enable_scheduled_functions:
         logger.info("IngestRugby365ResultsFunction skipped (scheduled functions disabled).")
         return
+
     logger.info("IngestRugby365ResultsFunction triggered.")
-    ingest_rugby365_results()
+
+    system_event = sql_client.start_system_event(
+        function_name="IngestRugby365ResultsFunction",
+        trigger_type="timer",
+        event_type="ingestion",
+    )
+
+    try:
+        ingest_rugby365_results(sql_client=sql_client, system_event_id=system_event.id)
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("IngestRugby365ResultsFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
 
 # Ingest Rugby365 fixtures data into the database.
 @app.schedule(
@@ -70,8 +135,29 @@ def IngestRugby365FixturesFunction(timer: func.TimerRequest) -> None:
     if not settings.enable_scheduled_functions:
         logger.info("IngestRugby365FixturesFunction skipped (scheduled functions disabled).")
         return
+
     logger.info("IngestRugby365FixturesFunction triggered.")
-    ingest_rugby365_fixtures()
+
+    system_event = sql_client.start_system_event(
+        function_name="IngestRugby365FixturesFunction",
+        trigger_type="timer",
+        event_type="ingestion",
+    )
+
+    try:
+        ingest_rugby365_fixtures(sql_client=sql_client, system_event_id=system_event.id)
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("IngestRugby365FixturesFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
 
 
 # Build feature tables from the ingested data.
@@ -90,8 +176,29 @@ def BuildFeatureTablesFunction(timer: func.TimerRequest) -> None:
     if not settings.enable_scheduled_functions:
         logger.info("BuildFeatureTablesFunction skipped (scheduled functions disabled).")
         return
+
     logger.info("BuildFeatureTablesFunction triggered.")
-    build_feature_tables()
+
+    system_event = sql_client.start_system_event(
+        function_name="BuildFeatureTablesFunction",
+        trigger_type="timer",
+        event_type="preprocessing",
+    )
+
+    try:
+        build_feature_tables()
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("BuildFeatureTablesFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
 
 
 # Train models on the feature tables.
@@ -110,8 +217,29 @@ def TrainModelsFunction(timer: func.TimerRequest) -> None:
     if not settings.enable_scheduled_functions:
         logger.info("TrainModelsFunction skipped (scheduled functions disabled).")
         return
+
     logger.info("TrainModelsFunction triggered.")
-    train_models()
+
+    system_event = sql_client.start_system_event(
+        function_name="TrainModelsFunction",
+        trigger_type="timer",
+        event_type="training",
+    )
+
+    try:
+        train_models()
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("TrainModelsFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
 
 
 # Score upcoming matches using the trained models.
@@ -130,8 +258,29 @@ def ScoreUpcomingMatchesFunction(timer: func.TimerRequest) -> None:
     if not settings.enable_scheduled_functions:
         logger.info("ScoreUpcomingMatchesFunction skipped (scheduled functions disabled).")
         return
+
     logger.info("ScoreUpcomingMatchesFunction triggered.")
-    score_upcoming_matches()
+
+    system_event = sql_client.start_system_event(
+        function_name="ScoreUpcomingMatchesFunction",
+        trigger_type="timer",
+        event_type="scoring",
+    )
+
+    try:
+        score_upcoming_matches()
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("ScoreUpcomingMatchesFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
 
 
 # Generate weekend predictions using the trained models.
@@ -150,8 +299,29 @@ def GenerateWeekendPredictionsFunction(timer: func.TimerRequest) -> None:
     if not settings.enable_scheduled_functions:
         logger.info("GenerateWeekendPredictionsFunction skipped (scheduled functions disabled).")
         return
+
     logger.info("GenerateWeekendPredictionsFunction triggered.")
-    generate_weekend_predictions()
+
+    system_event = sql_client.start_system_event(
+        function_name="GenerateWeekendPredictionsFunction",
+        trigger_type="timer",
+        event_type="notifications_prepare",
+    )
+
+    try:
+        generate_weekend_predictions()
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("GenerateWeekendPredictionsFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
 
 
 # Send prediction email using the generated weekend predictions.
@@ -167,7 +337,27 @@ def SendPredictionEmailFunction(msg: func.QueueMessage) -> None:
     of fixtures and model predictions.
     """
     body = msg.get_body().decode("utf-8")
-    logger.info(
-        "SendPredictionEmailFunction triggered with message body length=%d", len(body)
+
+    system_event = sql_client.start_system_event(
+        function_name="SendPredictionEmailFunction",
+        trigger_type="queue",
+        event_type="notifications_delivery",
     )
-    send_prediction_email(body)
+
+    try:
+        logger.info(
+            "SendPredictionEmailFunction triggered with message body length=%d", len(body)
+        )
+        send_prediction_email(body)
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("SendPredictionEmailFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise

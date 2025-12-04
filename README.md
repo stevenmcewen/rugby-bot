@@ -64,6 +64,35 @@ ALTER ROLE db_datareader ADD MEMBER [func-rugbybot-dev];
 ALTER ROLE db_datawriter ADD MEMBER [func-rugbybot-dev];
 ```
 
+### Event and Ingestion Metadata Tables
+
+To coordinate work between ingestion, preprocessing, and other functions, the system uses a small hierarchy of SQL tables:
+
+- `dbo.system_events`: **high-level function lifecycle tracking**
+  - One row per function execution (e.g. `IngestRugby365ResultsFunction`, `BuildFeatureTablesFunction`).
+  - Key columns:
+    - `id` (`UNIQUEIDENTIFIER`, PK) – event ID.
+    - `function_name` – name of the Azure Function.
+    - `trigger_type` – e.g. `http`, `timer`, `queue`.
+    - `event_type` – semantic label, e.g. `ingestion`, `preprocessing`.
+    - `status` – e.g. `started`, `succeeded`, `failed`.
+    - `started_at`, `completed_at`, `created_at` – UTC timestamps.
+- `dbo.ingestion_events`: **detailed ingestion file / batch tracking**
+  - Used both for logging and as orchestration metadata between ingestion and preprocessing.
+  - Key columns:
+    - `id` (`UNIQUEIDENTIFIER`, PK).
+    - `batch_id` – groups related ingestion events in a single run.
+    - `system_event_id` – optional FK → `system_events.id` to tie back to the parent function invocation.
+    - `integration_type` – e.g. `historical_results`, `rugby365_results`, `rugby365_fixtures`.
+    - `integration_provider` – e.g. `kaggle`, `rugby365`.
+    - `container_name`, `blob_path` – where the raw file lives in Blob Storage.
+    - `status` – lifecycle of the file/batch, e.g. `ingested`, `preprocessing`, `preprocessed`, `failed`.
+    - `error_message` – optional error details.
+    - `created_at`, `updated_at` – UTC timestamps.
+
+Ingestion functions insert rows into `ingestion_events` (and optionally `system_events`) when raw files are written to Blob.  
+Preprocessing functions query `ingestion_events` by `status` / `integration_type` / `integration_provider` to discover which raw files need to be processed next, providing a clean, decoupled handoff between stages.
+
 ## Key Vault Access
 
 The Function App identity has:
