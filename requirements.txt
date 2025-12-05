@@ -1,3 +1,7 @@
 azure-functions
 kagglehub == 0.3.13
 pandas == 2.3.3
+sqlalchemy == 2.0.44
+azure-identity==1.17.1
+pyodbc==5.1.0
+azure-storage-blob==12.20.0

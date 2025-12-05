@@ -16,6 +16,9 @@ class AppSettings:
     local development.
     """
 
+    # Environment / deployment
+    environment: Optional[str] = None
+
     # Azure SQL (silver layer)
     sql_server: Optional[str] = None
     sql_database: Optional[str] = None
@@ -47,6 +50,7 @@ def get_settings() -> AppSettings:
     """
 
     return AppSettings(
+        environment=os.getenv("ENVIRONMENT"),
         sql_server=os.getenv("SQL_SERVER"),
         sql_database=os.getenv("SQL_DATABASE"),
         storage_connection=os.getenv("AzureWebJobsStorage"),
