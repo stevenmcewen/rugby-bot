@@ -13,7 +13,7 @@ from functions.data_ingestion.integration_helpers import (
 )
 from functions.config.settings import get_settings
 from functions.logging.logger import get_logger
-from functions.sql_client import SqlClient
+from functions.sql.sql_client import SqlClient
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -83,7 +83,7 @@ class LogIngestionEventStartStep:
 
         try:
             # Insert a new row into the ingestion_events table.
-            ingestion_event_id = sql_client.insert_ingestion_event(
+            ingestion_event_id = sql_client.start_ingestion_event(
                 batch_id=batch_id,
                 system_event_id=context["system_event_id"],
                 container_name=context["raw_container_name"],
@@ -212,7 +212,7 @@ class WriteRawSnapshotsToBlobStep:
             )
 
             blob_client = BlobClient.from_connection_string(
-                connection_string=settings.storage_connection,
+                conn_str=settings.storage_connection,
                 container_name=context["raw_container_name"],
                 blob_name=blob_name,
             )
@@ -242,13 +242,13 @@ class LogIngestionEventCompleteStep:
 
     def __call__(self, context: IngestionContext) -> IngestionContext:
         logger.info(
-            "Logging ingestion event end for system_event_id=%s",
-            context["system_event_id"],
+            "Logging ingestion event end for ingestion_event_id=%s",
+            context["ingestion_event_id"],
         )
 
         sql_client: SqlClient = context["sql_client"]
         ingestion_event_id = context["ingestion_event_id"]
-        status = context.get("status", "unknown")
+        status = context["status"]
 
         if status == "failed":
             error_message = context.get("error_message", "Unknown error")
@@ -263,8 +263,8 @@ class LogIngestionEventCompleteStep:
             raise Exception(error_message)
         else:
             logger.info(
-                "Ingestion event completed successfully for system_event_id=%s",
-                context["system_event_id"],
+                "Ingestion event completed successfully for ingestion_event_id=%s",
+                context["ingestion_event_id"],
             )
             sql_client.update_ingestion_event(
                 ingestion_event_id=ingestion_event_id,
@@ -430,8 +430,3 @@ def ingest_rugby365_fixtures(sql_client: SqlClient, system_event_id: UUID) -> No
         integration_type="fixtures",
         integration_provider="rugby365",
     )
-
-
-if __name__ == "__main__":
-    # Simple local test hook
-    ingest_historical_kaggle_results(sql_client=SqlClient(settings), system_event_id=uuid4())

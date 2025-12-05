@@ -2,7 +2,7 @@ import azure.functions as func
 import json
 
 from functions.config.settings import get_settings
-from functions.sql_client import SqlClient
+from functions.sql.sql_client import SqlClient
 from functions.data_ingestion.integration_services import (
     ingest_historical_kaggle_results,
     ingest_rugby365_fixtures,
@@ -24,7 +24,7 @@ sql_client = SqlClient(settings)
 
 
 @app.route(route="IngestHistoricalKaggleResults", auth_level=func.AuthLevel.ANONYMOUS)
-def IngestHistoricalResults(req: func.HttpRequest) -> func.HttpResponse:
+def IngestHistoricalKaggleResults(req: func.HttpRequest) -> func.HttpResponse:
     """
     Ingest historical Kaggle results data into the database.
     """
