@@ -36,20 +36,23 @@ def IngestHistoricalKaggleResults(req: func.HttpRequest) -> func.HttpResponse:
         trigger_type="http",
         event_type="ingestion",
     )
-    # Ingest the historical results.
     try:
         # Ingest the historical results.
         ingest_historical_kaggle_results(
             sql_client=sql_client,
             system_event_id=system_event.id,
         )
-        # Complete the system event.
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="succeeded",
-        )
+        # Best-effort completion of the system event.
+        try:
+            sql_client.complete_system_event(
+                system_event_id=system_event.id,
+                status="succeeded",
+            )
+        except Exception as ce:  # pragma: no cover - defensive logging
+            logger.exception("Failed to mark system_event as succeeded: %s", ce)
+
         # Return a success response.
-        response = func.HttpResponse(
+        return func.HttpResponse(
             json.dumps(
                 {
                     "status": "ok",
@@ -64,14 +67,19 @@ def IngestHistoricalKaggleResults(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as exc:
         # Log the exception.
         logger.exception("IngestHistoricalKaggleResults failed.")
-        # Complete the failed system event.
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="failed",
-            details=str(exc),
-        )
-        # create a failed response.
-        response = func.HttpResponse(
+
+        # Best-effort completion of the failed system event.
+        try:
+            sql_client.complete_system_event(
+                system_event_id=system_event.id,
+                status="failed",
+                details=str(exc),
+            )
+        except Exception as ce:  # pragma: no cover - defensive logging
+            logger.exception("Failed to mark system_event as failed: %s", ce)
+
+        # Return a failed response.
+        return func.HttpResponse(
             json.dumps(
                 {
                     "status": "error",
@@ -82,9 +90,6 @@ def IngestHistoricalKaggleResults(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500,
             mimetype="application/json",
         )
-    finally:
-        # Return the response.
-        return response
 
 # Ingest Rugby365 results data into the database.
 @app.schedule(
@@ -352,15 +357,23 @@ def SendPredictionEmailFunction(msg: func.QueueMessage) -> None:
             "SendPredictionEmailFunction triggered with message body length=%d", len(body)
         )
         send_prediction_email(body)
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="succeeded",
-        )
+        # Best-effort completion of the system event.
+        try:
+            sql_client.complete_system_event(
+                system_event_id=system_event.id,
+                status="succeeded",
+            )
+        except Exception as ce:  # pragma: no cover - defensive logging
+            logger.exception("Failed to mark system_event as succeeded: %s", ce)
     except Exception as exc:  # pragma: no cover - defensive logging
         logger.exception("SendPredictionEmailFunction failed.")
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="failed",
-            details=str(exc),
-        )
+        # Best-effort completion of the failed system event.
+        try:
+            sql_client.complete_system_event(
+                system_event_id=system_event.id,
+                status="failed",
+                details=str(exc),
+            )
+        except Exception as ce:  # pragma: no cover - defensive logging
+            logger.exception("Failed to mark system_event as failed: %s", ce)
         raise

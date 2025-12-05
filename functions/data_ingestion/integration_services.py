@@ -82,6 +82,11 @@ class LogIngestionEventStartStep:
         context["batch_id"] = batch_id
 
         try:
+            # Use the current pipeline status so we don't overwrite a
+            # previous failure (e.g. download/scrape step failed).
+            status = context["status"]
+            error_message = context.get("error_message", None)
+
             # Insert a new row into the ingestion_events table.
             ingestion_event_id = sql_client.start_ingestion_event(
                 batch_id=batch_id,
@@ -89,9 +94,9 @@ class LogIngestionEventStartStep:
                 container_name=context["raw_container_name"],
                 integration_type=context["integration_type"],
                 integration_provider=context["integration_provider"],
-                status="started",
+                status=status,
                 blob_path=None,
-                error_message=None,
+                error_message=error_message,
             )
             # Update the context with the ingestion event id.
             context["ingestion_event_id"] = ingestion_event_id
