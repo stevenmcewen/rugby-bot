@@ -1,6 +1,8 @@
 import os
 import kagglehub
+from functions.config.settings import get_settings
 
+settings = get_settings()
 ### provider_helpers ###
 def download_historical_results_from_kaggle() -> tuple[str, str]:
     """
@@ -11,7 +13,8 @@ def download_historical_results_from_kaggle() -> tuple[str, str]:
         integration_dataset: The dataset that was downloaded.
     """
     try:
-        integration_dataset = "lylebegbie/international-rugby-union-results-from-18712022"
+        # Download the dataset
+        integration_dataset = settings.kaggle_dataset
         local_directory = kagglehub.dataset_download(integration_dataset)
         local_file_path = os.path.join(local_directory, "results.csv")
         return local_file_path, integration_dataset
