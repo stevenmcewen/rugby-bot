@@ -210,7 +210,6 @@ class WriteRawSnapshotsToBlobStep:
             local_path = context["local_integration_file_path"]
 
             blob_name = (
-                f"raw/"
                 f"{context['integration_type']}/"
                 f"{context['integration_provider']}/"
                 f"{context['integration_dataset']}.csv"
