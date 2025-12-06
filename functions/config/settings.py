@@ -82,9 +82,17 @@ def get_settings() -> AppSettings:
     environment = get_secret(secret_name="ENVIRONMENT")
     sql_server = get_secret(secret_name="SQL-SERVER")
     sql_database = get_secret(secret_name="SQL-DATABASE")
-    storage_connection = get_secret(secret_name="STORAGE-CONNECTION", default_env_var="AzureWebJobsStorage")
+    storage_connection = get_secret(
+        secret_name="STORAGE-CONNECTION",
+        default_env_var="AzureWebJobsStorage",
+    )
     raw_container_name = get_secret(secret_name="RAW-INGESTION-CONTAINER")
-    enable_scheduled_functions = get_secret(secret_name="ENABLE-SCHEDULED-FUNCTIONS").lower() == "true"
+
+    # Treat a missing or unset flag as "false" so local dev / tests
+    # without Key Vault configured don't crash on `.lower()`.
+    enable_flag_raw = get_secret(secret_name="ENABLE-SCHEDULED-FUNCTIONS")
+    enable_scheduled_functions = (enable_flag_raw or "").lower() == "true"
+
     kaggle_dataset = get_secret(secret_name="KAGGLE-DATASET")
 
 

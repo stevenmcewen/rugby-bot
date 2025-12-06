@@ -42,13 +42,18 @@ jobs:
       - name: Install test dependencies
         run: |
           source venv/bin/activate
-          pip install pytest
+          pip install pytest pytest-cov
 
       - name: Run unit tests
         run: |
           source venv/bin/activate
           set +e
-          pytest
+          pytest \
+            --cov-config=.coveragerc \
+            --cov=function_app \
+            --cov=functions \
+            --cov-report=term-missing \
+            --cov-fail-under=80
           status=$?
           set -e
           if [ "$status" -eq 5 ]; then

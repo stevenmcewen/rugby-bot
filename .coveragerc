@@ -1,0 +1,22 @@
+[run]
+branch = True
+source =
+    function_app
+    functions
+
+# Files and patterns to omit from coverage measurement.
+omit =
+    # Ignore package initialisers
+    */__init__.py
+
+    # Example template/boilerplate modules to skip (uncomment or add your own):
+    functions/data_preprocessing/services.py
+    functions/ml_models/services.py
+    functions/notifications/services.py
+    functions/utils/utils.py
+
+
+[report]
+show_missing = True
+
+
