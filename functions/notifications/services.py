@@ -31,8 +31,8 @@ def send_prediction_email(payload: str) -> None:
 
     logger.info(
         "Sending prediction email from %s to %s",
-        settings.email_from,
-        settings.email_to,
+        # settings.email_from,
+        # settings.email_to,
     )
     # TODO: parse payload, render template, and send email via chosen provider.
 
