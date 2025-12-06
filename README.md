@@ -64,6 +64,21 @@ ALTER ROLE db_datareader ADD MEMBER [func-rugbybot-dev];
 ALTER ROLE db_datawriter ADD MEMBER [func-rugbybot-dev];
 ```
 
+### Data Access and Event Tracking Philosophy
+
+At runtime, the Functions code never talks directly to Azure SQL with ad‑hoc connection strings.  
+Instead, it uses a small data access layer (`SqlClient` in `functions/sql/sql_client.py`) that:
+
+- **Centralises how we talk to the database** so every function (ingestion, preprocessing, modelling, notifications) uses the same, tested path to SQL.
+- **Uses managed identity under the hood** so credentials are never checked into source control or stored in configuration – they live only in Entra ID.
+- **Records high-level “system events” and “ingestion events”** in SQL whenever functions run or batches are processed, giving us an audit trail of:
+  - which function ran,
+  - which data batches were ingested,
+  - and whether they succeeded, are in progress, or failed.
+- **Supports orchestration-by-metadata**: downstream jobs (e.g. preprocessing) discover what to work on by querying these event tables, rather than by being tightly coupled to the ingestion code.
+
+The goal is to treat the database not just as storage, but also as the “control plane” for long‑running ingestion pipelines: transparent, queryable, and easy to debug.
+
 ### Event and Ingestion Metadata Tables
 
 To coordinate work between ingestion, preprocessing, and other functions, the system uses a small hierarchy of SQL tables:
@@ -100,12 +115,19 @@ The Function App identity has:
 Role: `Key Vault Secrets User`  
 Principal: The Function App system-assigned identity
 
-Secrets retrieved in Python using:
+Secrets are retrieved at runtime using the Azure SDK for Python (`DefaultAzureCredential` + `SecretClient`).
 
-```python
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
-```
+### Configuration and Secret Management Philosophy
+
+The configuration system (`AppSettings` and helpers in `functions/config/settings.py`) is designed to answer one question cleanly:  
+**“How do we keep the same code running in multiple environments (local, dev, prod) without ever hard‑coding secrets?”**
+
+- **Single source of truth for settings**: application code asks for a strongly-typed `AppSettings` object instead of reading environment variables everywhere.
+- **Key Vault first, environment as a safety net**: sensitive values (SQL server name, database name, storage connection, raw data container, Kaggle dataset) are expected to live in Key Vault, but can fall back to environment variables for local development or emergency overrides.
+- **Same pattern everywhere**: ingestion, preprocessing, SQL access, and notifications all depend on `get_settings()`, so switching environments is a matter of changing Key Vault + app settings, not changing code.
+- **Supports 12‑factor style deployment**: configuration is externalised, secrets are centralised, and rotating a secret is an operational change, not a code change.
+
+Together with managed identity, this means the system is secure by default (no passwords in code), yet still easy to run locally and easy to reason about at a high level.
 
 ---
 
@@ -116,7 +138,7 @@ from azure.keyvault.secrets import SecretClient
 ```bash
 python -m venv .venv
 .\.venv\Scripts\activate
-python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 ## Azure Functions Core Tools
@@ -135,9 +157,9 @@ func start
 
 ---
 
-# CI/CD Pipeline (GitHub Actions → Azure Functions)
+## CI/CD Pipeline (GitHub Actions → Azure Functions + Tests)
 
-GitHub Actions automates deployment on each push to `main`.
+GitHub Actions automates deployment on each push to `main`, and can also run tests on pull requests.
 
 Pipeline tasks:
 
@@ -145,6 +167,22 @@ Pipeline tasks:
 - Build the function app
 - Create a deployment artifact
 - Deploy using Azure publish profile
+
+### Test Execution (pytest)
+
+The same GitHub Actions workflow also runs Python unit tests using `pytest` as part of the `build` job:
+
+- Creates a virtual environment and installs dependencies from `requirements.txt`.
+- Installs `pytest` as a dev/CI-only dependency.
+- Runs `pytest` from the repository root, using standard discovery rules:
+  - Files named `test_*.py` or `*_test.py`
+  - Located anywhere under the repo (e.g. a `tests/` folder or module-adjacent tests).
+- If tests fail (non‑zero pytest exit code other than “no tests collected”), the `build` job fails and deployment does not proceed.
+- If no tests are present yet, the workflow logs a message and continues, so will gradually add tests.
+
+### Enforcing “tests must pass before merge” (GitHub branch protection)
+
+This was something that I ideally wanted to do, I set up the branch policy but i needed a github teams account to enforce it.
 
 Workflow file location:
 
@@ -185,26 +223,38 @@ Current structure:
 ```
 rugby-bot/
 │
-├── .github/workflows/              # CI/CD pipelines
-├── .venv/                          # Local venv (ignored in Git)
-├── host.json                       # Function runtime config
-├── local.settings.json             # Local config (not committed)
-├── requirements.txt                # Dependencies
-├── function_app.py                 # Azure Functions entrypoint / wiring
+├── .github/workflows/                  # CI/CD pipelines (build, tests, deploy)
+├── host.json                           # Function runtime config
+├── local.settings.json                 # Local config (not committed)
+├── requirements.txt                    # Runtime dependencies
+├── function_app.py                     # Azure Functions entrypoint / wiring
+├── local testing notebooks/            # Local experimentation / diagnostics
+│   └── local_ingest_historical_results_test.ipynb
 │
-└── functions/                      # Application modules (reusable logic)
+└── functions/                          # Application modules (reusable logic)
     ├── config/
-    │   └── settings.py             # AppSettings + get_settings()
+    │   ├── __init__.py
+    │   └── settings.py                 # AppSettings + get_settings()
     ├── data_ingestion/
-    │   └── services.py             # Kaggle + Rugby365 ingestion orchestration
+    │   ├── __init__.py
+    │   ├── integration_helpers.py      # Helper functions for ingestion workflows
+    │   └── integration_services.py     # Kaggle + Rugby365 ingestion orchestration
     ├── data_preprocessing/
-    │   └── services.py             # Bronze → silver feature building
+    │   ├── __init__.py
+    │   └── services.py                 # Bronze → silver feature building
     ├── logging/
-    │   └── logger.py               # get_logger() and logging helpers
+    │   ├── __init__.py
+    │   └── logger.py                   # get_logger() and logging helpers
     ├── ml_models/
-    │   └── services.py             # Training and scoring logic
+    │   ├── __init__.py
+    │   └── services.py                 # Training and scoring logic
     ├── notifications/
-    │   └── services.py             # Prediction summary + email sending
+    │   ├── __init__.py
+    │   └── services.py                 # Prediction summary + email sending
+    ├── sql/
+    │   ├── __init__.py
+    │   └── sql_client.py               # Centralised SQL access layer (Managed Identity)
     └── utils/
-        └── utils.py                # Shared utilities (placeholder)
+        ├── __init__.py
+        └── utils.py                    # Shared utilities and helpers
 ```

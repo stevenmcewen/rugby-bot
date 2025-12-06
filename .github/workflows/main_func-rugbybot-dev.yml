@@ -35,7 +35,28 @@ jobs:
           source venv/bin/activate
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          source venv/bin/activate
+          pip install -r requirements.txt
+
+      - name: Install test dependencies
+        run: |
+          source venv/bin/activate
+          pip install pytest
+
+      - name: Run unit tests
+        run: |
+          source venv/bin/activate
+          set +e
+          pytest
+          status=$?
+          set -e
+          if [ "$status" -eq 5 ]; then
+            echo "Pytest did not collect any tests (exit code 5)."
+            echo "Skipping test failure so the pipeline can still run until tests are added."
+            exit 0
+          fi
+          exit "$status"
 
       # Optional: Add step to run tests here
 
