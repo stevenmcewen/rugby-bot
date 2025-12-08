@@ -42,6 +42,9 @@ class SqlClient:
 
         # Build a raw ODBC connection string. We use a custom creator
         # so that each new connection gets a *fresh* AAD token.
+
+        logger.info("SQL config - server=%s, database=%s", settings.sql_server, settings.sql_database)
+
         odbc_conn_str = (
             "Driver={ODBC Driver 18 for SQL Server};"
             f"Server=tcp:{settings.sql_server},1433;"
