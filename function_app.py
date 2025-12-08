@@ -91,43 +91,41 @@ def IngestHistoricalKaggleResults(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json",
         )
 
-# # Ingest Rugby365 results data into the database.
-# @app.schedule(
-#     schedule="0 0 1 * * *",  # 01:00 UTC daily for Rugby365 results
-#     arg_name="timer",
-#     run_on_startup=False,
-#     use_monitor=True,
-# )
-# def IngestRugby365ResultsFunction(timer: func.TimerRequest) -> None:
-#     """
-#     Ingest Rugby365 results data into the database.
-#     """
-#     if not settings.enable_scheduled_functions:
-#         logger.info("IngestRugby365ResultsFunction skipped (scheduled functions disabled).")
-#         return
+# Ingest Rugby365 results data into the database.
+@app.schedule(
+    schedule="0 0 1 * * *", 
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def IngestRugby365ResultsFunction(timer: func.TimerRequest) -> None:
+    """
+    Ingest Rugby365 results data into the database.
+    """
 
-#     logger.info("IngestRugby365ResultsFunction triggered.")
+    logger.info("IngestRugby365ResultsFunction triggered.")
 
-#     system_event = sql_client.start_system_event(
-#         function_name="IngestRugby365ResultsFunction",
-#         trigger_type="timer",
-#         event_type="ingestion",
-#     )
+    system_event = sql_client.start_system_event(
+        function_name="IngestRugby365ResultsFunction",
+        trigger_type="timer",
+        event_type="ingestion",
+    )
 
-#     try:
-#         ingest_rugby365_results(sql_client=sql_client, system_event_id=system_event.id)
-#         sql_client.complete_system_event(
-#             system_event_id=system_event.id,
-#             status="succeeded",
-#         )
-#     except Exception as exc:  # pragma: no cover - defensive logging
-#         logger.exception("IngestRugby365ResultsFunction failed.")
-#         sql_client.complete_system_event(
-#             system_event_id=system_event.id,
-#             status="failed",
-#             details=str(exc),
-#         )
-#         raise
+    try:
+        ingest_rugby365_results(sql_client=sql_client, system_event_id=system_event.id)
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("IngestRugby365ResultsFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+
+
 
 # # Ingest Rugby365 fixtures data into the database.
 # @app.schedule(

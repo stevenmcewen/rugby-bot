@@ -68,64 +68,94 @@ def test_download_historical_data_step_error(monkeypatch):
     assert result["status"] == "failed"
     assert "boom" in result["error_message"]
 
-# Does ScrapeResultsOrFixturesStep call scrape_results and pass the context to the next step?
-# must call scrape_results with the correct provider and return the correct local file path and integration dataset
+# Does ScrapeResultsOrFixturesStep call scrape_values for results and pass the context to the next step?
+# must call scrape_values with the correct provider/type and return the correct local file path and integration dataset
 def test_scrape_results_or_fixtures_results(monkeypatch):
     step = services.ScrapeResultsOrFixturesStep()
 
-    def fake_scrape_results(provider: str) -> tuple[str, str]:
-        assert provider == "rugby365"
+    called = {}
+
+    def fake_scrape_values(integration_provider: str, integration_type: str, sql_client) -> tuple[str, str]:
+        called["provider"] = integration_provider
+        called["type"] = integration_type
+        called["sql_client"] = sql_client
         return "/tmp/results.csv", "results_dataset"
 
-    monkeypatch.setattr(services, "scrape_results", fake_scrape_results)
+    monkeypatch.setattr(services, "scrape_values", fake_scrape_values)
+
+    class FakeSqlClient:
+        pass
 
     ctx: services.IngestionContext = {
         "integration_type": "results",
         "integration_provider": "rugby365",
+        "sql_client": FakeSqlClient(),
     }
 
     result = step(ctx)
 
+    assert called["provider"] == "rugby365"
+    assert called["type"] == "results"
     assert result["local_integration_file_path"] == "/tmp/results.csv"
     assert result["integration_dataset"] == "results_dataset"
     assert result["status"] == "started"
 
-# Does ScrapeResultsOrFixturesStep call scrape_fixtures and pass the context to the next step?
-# must call scrape_fixtures with the correct provider and return the correct local file path and integration dataset
+# Does ScrapeResultsOrFixturesStep call scrape_values for fixtures and pass the context to the next step?
+# must call scrape_values with the correct provider/type and return the correct local file path and integration dataset
 def test_scrape_results_or_fixtures_fixtures(monkeypatch):
     step = services.ScrapeResultsOrFixturesStep()
 
-    def fake_scrape_fixtures(provider: str) -> tuple[str, str]:
-        assert provider == "rugby365"
+    called = {}
+
+    def fake_scrape_values(integration_provider: str, integration_type: str, sql_client) -> tuple[str, str]:
+        called["provider"] = integration_provider
+        called["type"] = integration_type
+        called["sql_client"] = sql_client
         return "/tmp/fixtures.csv", "fixtures_dataset"
 
-    monkeypatch.setattr(services, "scrape_fixtures", fake_scrape_fixtures)
+    monkeypatch.setattr(services, "scrape_values", fake_scrape_values)
+
+    class FakeSqlClient:
+        pass
 
     ctx: services.IngestionContext = {
         "integration_type": "fixtures",
         "integration_provider": "rugby365",
+        "sql_client": FakeSqlClient(),
     }
 
     result = step(ctx)
 
+    assert called["provider"] == "rugby365"
+    assert called["type"] == "fixtures"
     assert result["local_integration_file_path"] == "/tmp/fixtures.csv"
     assert result["integration_dataset"] == "fixtures_dataset"
     assert result["status"] == "started"
 
 # Does ScrapeResultsOrFixturesStep handle invalid integration type gracefully?
-# must set the status to "failed" and set the error message
+# must set the status to "failed", set the error message and propagate the error
 def test_scrape_results_or_fixtures_invalid_type(monkeypatch):
     step = services.ScrapeResultsOrFixturesStep()
+
+    class FakeSqlClient:
+        pass
+
+    def fake_scrape_values(integration_provider: str, integration_type: str, sql_client):
+        raise ValueError(f"Unsupported integration type: {integration_type}")
+
+    monkeypatch.setattr(services, "scrape_values", fake_scrape_values)
 
     ctx: services.IngestionContext = {
         "integration_type": "unknown",
         "integration_provider": "rugby365",
+        "sql_client": FakeSqlClient(),
     }
 
-    result = step(ctx)
+    with pytest.raises(ValueError) as exc:
+        step(ctx)
 
-    assert result["status"] == "failed"
-    assert "Unsupported integration type" in result["error_message"]
+    assert ctx["status"] == "failed"
+    assert "Unsupported integration type" in ctx["error_message"]
 
 # Does WriteRawSnapshotsToBlobStep skip when status is failed?
 # must not call BlobClient and set the status to "failed" and set the error message
@@ -163,8 +193,9 @@ def test_write_raw_snapshots_success(monkeypatch):
         def __init__(self, *_, **__):
             pass
 
-        def upload_blob(self, path: str, overwrite: bool) -> None:
-            uploaded["path"] = path
+        def upload_blob(self, data, overwrite: bool) -> None:
+            # In production we pass an open file handle; in tests we just record it.
+            uploaded["data"] = data
             uploaded["overwrite"] = overwrite
 
     def fake_from_connection_string(conn_str: str, container_name: str, blob_name: str):
@@ -177,6 +208,28 @@ def test_write_raw_snapshots_success(monkeypatch):
     monkeypatch.setattr(
         services, "BlobClient", types.SimpleNamespace(from_connection_string=fake_from_connection_string)
     )
+
+    # Patch `open` used in the module so we don't need a real file on disk.
+    class FakeFile:
+        def __init__(self, path: str):
+            self.path = path
+
+        def read(self, *_a, **_k):
+            return b"fake-bytes"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+    def fake_open(path: str, mode: str = "r", *_, **__):
+        uploaded["opened_path"] = path
+        uploaded["mode"] = mode
+        return FakeFile(path)
+
+    # The implementation uses the built-in open; patch it in this module's namespace.
+    monkeypatch.setattr(services, "open", fake_open, raising=False)
 
     # Patch settings used inside the module
     services.settings = types.SimpleNamespace(
@@ -200,7 +253,9 @@ def test_write_raw_snapshots_success(monkeypatch):
     assert uploaded["conn_str"] == "UseDevelopmentStorage=true"
     assert uploaded["container_name"] == "raw-container"
     assert uploaded["blob_name"] == expected_blob_name
-    assert uploaded["path"] == "/tmp/results.csv"
+    # Ensure we tried to open the correct local path in binary mode
+    assert uploaded["opened_path"] == "/tmp/results.csv"
+    assert uploaded["mode"] == "rb"
     assert uploaded["overwrite"] is True
     assert result["blob_snapshot_uri"] == expected_blob_name
     assert result["status"] == "ingested"
@@ -222,6 +277,25 @@ def test_write_raw_snapshots_error(monkeypatch):
         storage_connection="conn",
         raw_container_name="raw-container",
     )
+
+    # Patch `open` so that file access succeeds and the error comes from upload_blob.
+    class FakeFile:
+        def __init__(self, path: str):
+            self.path = path
+
+        def read(self, *_a, **_k):
+            return b"fake-bytes"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+    def fake_open(path: str, mode: str = "r", *_, **__):
+        return FakeFile(path)
+
+    monkeypatch.setattr(services, "open", fake_open, raising=False)
 
     ctx: services.IngestionContext = {
         "status": "started",

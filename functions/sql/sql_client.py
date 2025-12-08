@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 import sqlalchemy as sa
 from azure.identity import DefaultAzureCredential
@@ -296,5 +297,51 @@ class SqlClient:
         except Exception as e:
             logger.error("Error updating ingestion event: %s", e)
             raise
+            
+    def get_last_ingestion_event_created_at(
+        self,
+        integration_provider: str,
+        integration_type: str,
+    ) -> datetime | None:
+        """
+        Get the most recent ingestion_event.created_at for a given provider and type.
 
+        Returns a timezone‑naive UTC datetime (as stored in SQL) or None if no
+        successful/preprocessed ingestions exist.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT MAX(created_at)
+                        FROM dbo.ingestion_events
+                        WHERE integration_provider = :integration_provider
+                          AND integration_type = :integration_type
+                          AND status IN ('ingested', 'preprocessed', 'preprocessing');
+                        """
+                    ),
+                    {
+                        "integration_provider": integration_provider,
+                        "integration_type": integration_type,
+                    },
+                )
+                last_ingestion_event_created_at = result.scalar()
 
+                if last_ingestion_event_created_at is None:
+                    return None
+
+                # SQLAlchemy may already give us a datetime; if it's a string, parse it.
+                if isinstance(last_ingestion_event_created_at, datetime):
+                    return last_ingestion_event_created_at
+
+                # Fallback: attempt to parse common SQL datetime string formats.
+                text_val = str(last_ingestion_event_created_at)
+                try:
+                    return datetime.fromisoformat(text_val)
+                except ValueError:
+                    # e.g. '2025-12-08 14:18:52.123456'
+                    return datetime.strptime(text_val, "%Y-%m-%d %H:%M:%S.%f")
+        except Exception as e:
+            logger.error("Error getting last ingestion event created_at date: %s", e)
+            raise

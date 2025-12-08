@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -93,13 +94,16 @@ def test_get_token_builds_odbc_token():
 
 
 class DummyResult:
-    def __init__(self, row_value: str | None = None):
+    def __init__(self, row_value: object | None = None):
         self._row_value = row_value
 
     def first(self):
         if self._row_value is None:
             return None
         return (self._row_value,)
+
+    def scalar(self):
+        return self._row_value
 
 
 class DummyConnection:
@@ -272,3 +276,56 @@ def test_update_ingestion_event_error(monkeypatch):
         )
 
 
+def test_get_last_ingestion_event_created_at_returns_none(monkeypatch):
+    """
+    get_last_ingestion_event_created_at
+    - must return None when the query result is NULL
+    """
+    conn = DummyConnection(row_value=None)
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    result = client.get_last_ingestion_event_created_at(
+        integration_provider="rugby365",
+        integration_type="results",
+    )
+
+    assert result is None
+
+
+def test_get_last_ingestion_event_created_at_returns_datetime_direct(monkeypatch):
+    """
+    get_last_ingestion_event_created_at
+    - must return a datetime unchanged when the DB already returns a datetime value
+    """
+    dt = datetime(2025, 12, 8, 14, 30, 0)
+    conn = DummyConnection(row_value=dt)
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    result = client.get_last_ingestion_event_created_at(
+        integration_provider="rugby365",
+        integration_type="results",
+    )
+
+    assert isinstance(result, datetime)
+    assert result == dt
+
+
+def test_get_last_ingestion_event_created_at_parses_iso_string(monkeypatch):
+    """
+    get_last_ingestion_event_created_at
+    - must parse common ISO datetime string values returned by SQL
+    """
+    value = "2025-12-08T14:18:52.123456"
+    conn = DummyConnection(row_value=value)
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    result = client.get_last_ingestion_event_created_at(
+        integration_provider="rugby365",
+        integration_type="results",
+    )
+
+    assert isinstance(result, datetime)
+    assert result == datetime.fromisoformat(value)
