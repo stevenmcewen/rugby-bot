@@ -17,7 +17,7 @@ from functions.sql.sql_client import SqlClient
 
 settings = get_settings()
 
-# Rugby365 HTTP headers – pretend to be a normal browser to avoid Cloudflare issues.
+# HTTP headers – pretend to be a normal browser to avoid Cloudflare issues.
 RUGBY365_REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -34,7 +34,15 @@ def get_page_htmls(
     integration_type: str,
 ) -> list[str]:
     """
-    Build the list of Rugby365 results/fixtures URLs for the given dates.
+    This function is a dispatcher for the appropriate function to get the page htmls from the given integration provider and type 
+    for the given dates. 
+    NOTE: If more integration providers for getting page htmls are added, this function will need to be updated to dispatch to the appropriate function.
+    Accepts:
+    - A list of scraping dates
+    - The integration provider
+    - The integration type
+    Returns:
+    - A list of page htmls
     """
     if integration_provider.lower() == "rugby365":
         page_htmls = get_page_htmls_from_rugby365(scraping_dates, integration_type)
@@ -50,7 +58,15 @@ def scrape_values_from_page_htmls(
     integration_type: str,
 ) -> pd.DataFrame:
     """
-    Function that calls the appropriate function to scrape values from the given page htmls.
+    This function is a dispatcher for the appropriate function to scrape values from the given page htmls.
+    NOTE: If more integration providers for scraping values are added, this function will need to be updated to dispatch to the appropriate function.
+    Accepts:
+    - A list of page htmls (list of strings)
+    - A list of scraping dates (list of datetime objects)
+    - The integration provider (string)
+    - The integration type (string)
+    Returns:
+    - A pandas DataFrame containing the scraped values (DataFrame)
     """
     if integration_provider.lower() == "rugby365":
         scraped_values = scrape_values_from_page_htmls_from_rugby365_for_dates(
@@ -62,13 +78,20 @@ def scrape_values_from_page_htmls(
         raise ValueError(f"Unsupported integration provider: {integration_provider!r}")
     return scraped_values
 
+
 def scrape_values_for_dates(
     scraping_dates: list[datetime],
     integration_provider: str,
     integration_type: str,
 ) -> pd.DataFrame:
     """
-    Function that scrapes values for the given dates from the given integration provider and type.
+    This is a wrapper function that gets the page htmls for the given dates and then scrapes the values from the page htmls.
+    Accepts:
+    - A list of scraping dates (list of datetime objects)
+    - The integration provider (string)
+    - The integration type (string)
+    Returns:
+    - A pandas DataFrame containing the scraped values (DataFrame)
     """
     # get the page html for the given dates
     page_htmls = get_page_htmls(scraping_dates, integration_provider, integration_type)
@@ -84,24 +107,24 @@ def save_scraped_values_to_local_file(
     integration_type: str,
 ) -> str:
     """
-    Persist scraped values to a temporary CSV file and return its path.
+    This function persists scraped values to a temporary CSV file and returns its path as per our ingestion pipeline requirements.
+    Accepts:
+    - A pandas DataFrame containing the scraped values (DataFrame)
+    - The integration provider (string)
+    - The integration type (string)
+    Returns:
+    - The path to the saved file (string)
 
     The ingestion pipeline will upload this file into Blob Storage.
-    
-    Accepts:
-    - A pandas DataFrame containing the scraped values
-    - The integration provider
-    - The integration type
-    Returns:
-    - The path to the saved file
     """
+    # create a temporary file path
     prefix = f"{integration_provider}_{integration_type}_"
-    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".csv")
-    os.close(fd)
-
+    # create a temporary file
+    file_descriptor, path = tempfile.mkstemp(prefix=prefix, suffix=".csv")
+    os.close(file_descriptor)
+    # save the scraped values to the temporary file
     scraped_values.to_csv(path, index=False)
     return path
-
 
 # provider_helpers ###
 # kaggle_helpers ###
@@ -129,8 +152,12 @@ def get_page_htmls_from_rugby365(
     integration_type: str,
 ) -> list[str]:
     """
-    Build the Rugby365 URL for each date using the
-    'page-change-date=YYYY|MM|DD' query format.
+    This function builds the Rugby365 URL for each date using the 'page-change-date=YYYY|MM|DD' query format that Rugby365 uses.
+    Accepts:
+    - A list of scraping dates (list of datetime objects)
+    - The integration type (string)
+    Returns:
+    - A list of Rugby365 URLs (list of strings)
     """
     page_htmls: list[str] = []
     base_url = "https://rugby365.com/"
@@ -163,24 +190,26 @@ def parse_rugby365_games_from_html(
     on the page beyond the selected date range.
 
     Accepts:
-    - The HTML of a Rugby365 results/fixtures page
-    - A set of scraping dates
-    - The integration type
+    - The HTML of a Rugby365 results/fixtures page (string)
+    - A set of scraping dates (set of datetime objects)
+    - The integration type (string)
 
     Returns:
-    - A list of game dictionaries
+    - A list of game dictionaries (list of dictionaries)
     """
+    # parse the html into a BeautifulSoup object
     soup = BeautifulSoup(html, "html.parser")
-
+    # find the games section in the BeautifulSoup object
     games_section = soup.find("section", class_="games-list")
     if not games_section:
         return []
 
     results: list[dict] = []
-    # Normalise target dates to plain date objects once
+    # Normalise target dates to plain date objects once (ignore the time component)
     target_dates = {d if hasattr(d, "year") and not hasattr(d, "hour") else d.date() for d in scraping_dates_set}
 
     for item in games_section.find_all("div", class_="games-list-item", recursive=False):
+        # find the date div in the item 
         date_div = item.find("div", class_="date")
         if not date_div:
             continue
@@ -203,7 +232,9 @@ def parse_rugby365_games_from_html(
             competition_name = comp_name_elem.get_text(strip=True) if comp_name_elem else None
             competition_id = comp_div.get("data-id")
 
+            # find the games container in the competition div
             games_container = comp_div.find("div", class_="games")
+            # if there are no games, continue
             if not games_container:
                 continue
 
@@ -212,8 +243,11 @@ def parse_rugby365_games_from_html(
                 time_block = game_div.find("div", class_="time")
                 state = None
                 venue = None
+                # if there is a time block, find the state and venue
                 if time_block:
+                    # find the state div in the time block
                     state_elem = time_block.find("div", class_="state")
+                    # find the venue div in the time block
                     venue_elem = time_block.find("div", class_="venue")
                     state = state_elem.get_text(strip=True) if state_elem else None
                     venue = venue_elem.get_text(strip=True) if venue_elem else None
@@ -260,11 +294,13 @@ def parse_rugby365_games_from_html(
                 if match_link:
                     parsed = urlparse(match_link)
                     qs = parse_qs(parsed.query)
-                    # Rugby365 appears to use ?g=<numeric-id>
+                    # Rugby365 uses the 'g' parameter to identify the match
+                    # get the 'g' parameter value
                     g_vals = qs.get("g")
+                    # if there is a 'g' parameter value, set the match_id
                     if g_vals:
                         match_id = g_vals[0]
-
+                # add the game to the results list
                 results.append(
                     {
                         "provider": "rugby365",
@@ -295,19 +331,21 @@ def scrape_values_from_page_htmls_from_rugby365_for_dates(
     integration_type: str,
 ) -> pd.DataFrame:
     """
-    Function that fetches and scrapes Rugby365 pages for the given dates.
+    This function is a wrapper function that fetches and scrapes Rugby365 pages for the given dates.
+    This function bounds the scraping logic to the given dates and integration type, 
+    so that we don't scrape older results that Rugby365 continues to show on the page beyond the selected date range.
 
     Accepts:
-    - A list of page HTMLs
-    - A list of scraping dates
-    - The integration type
+    - A list of page HTMLs (list of strings)
+    - A list of scraping dates (list of datetime objects)
+    - The integration type (string)
 
     Returns:
     - A pandas DataFrame containing the scraped games
     """
     all_games: list[dict] = []
     dates_set = set(scraping_dates)
-    # loop through each page url
+    # loop through each HTML (i.e. each date's page)
     for url in page_htmls:
         # get the page response (use browser-like headers to avoid 520/Cloudflare)
         resp = requests.get(url, headers=RUGBY365_REQUEST_HEADERS, timeout=15)
@@ -319,9 +357,9 @@ def scrape_values_from_page_htmls_from_rugby365_for_dates(
             scraping_dates_set=dates_set,
             integration_type=integration_type,
         )
-        # add the page games to the all_games list
         all_games.extend(page_games)
-        # be polite to the Rugby365 servers
+
+        # add a small delay so that we don't overwhelm the Rugby365 servers and get blocked
         time.sleep(1)
 
     # if there are no games, return an empty DataFrame
@@ -336,12 +374,20 @@ def scrape_values_from_page_htmls_from_rugby365_for_dates(
 ## main_functions ###
 def download_historical_results(integration_provider: str) -> tuple[str, str]:
     """
-    Download historical results from the given integration provider.
+    This is the main function that orchestrates the download of historical results from the given integration provider.
+    NOTE: If more integration providers for downloading historical results are added, this function will need to be updated to dispatch to the appropriate function.
+    Accepts:
+    - The integration provider (string)
+    Returns:
+    - The path to the downloaded file (string)
+    - The integration dataset name (string)
     """
-    if integration_provider != "kaggle":
+    # delegate to the appropriate function based on the integration provider
+    if integration_provider == "kaggle":
+        local_file_path, integration_dataset = download_historical_results_from_kaggle()
+    else:
         raise ValueError(f"Unsupported integration provider: {integration_provider!r}")
 
-    local_file_path, integration_dataset = download_historical_results_from_kaggle()
     return local_file_path, integration_dataset
 
 def scrape_values(
