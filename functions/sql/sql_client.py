@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
+import time
 import sqlalchemy as sa
 from azure.identity import DefaultAzureCredential
 import pyodbc
@@ -59,12 +61,36 @@ class SqlClient:
             Factory used by SQLAlchemy for each new DBAPI connection.
 
             This ensures we always attach a current access token and
-            avoid token‑expiry issues with long‑lived pools.
+            avoid token‑expiry issues with long‑lived pools. It also
+            adds some basic retry logic to improve resilience during
+            cold starts (e.g. when SQL or managed identity is still
+            waking up).
             """
-            return pyodbc.connect(
-                odbc_conn_str,
-                attrs_before=self.get_token(),
-            )
+            max_attempts = 3
+            delay_seconds = 5
+            last_exc: Exception | None = None
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return pyodbc.connect(
+                        odbc_conn_str,
+                        attrs_before=self.get_token(),
+                    )
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "SQL connection attempt %s/%s failed: %s",
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    if attempt < max_attempts:
+                        time.sleep(delay_seconds)
+                        # exponential backoff pattern
+                        delay_seconds *= 2
+
+            logger.error("SQL connection failed after %s attempts", max_attempts)
+            raise last_exc
 
         self.engine = sa.create_engine(
             "mssql+pyodbc://",
@@ -296,5 +322,51 @@ class SqlClient:
         except Exception as e:
             logger.error("Error updating ingestion event: %s", e)
             raise
+            
+    def get_last_ingestion_event_created_at(
+        self,
+        integration_provider: str,
+        integration_type: str,
+    ) -> datetime | None:
+        """
+        Get the most recent ingestion_event.created_at for a given provider and type.
 
+        Returns a timezone‑naive UTC datetime (as stored in SQL) or None if no
+        successful/preprocessed ingestions exist.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT MAX(created_at)
+                        FROM dbo.ingestion_events
+                        WHERE integration_provider = :integration_provider
+                          AND integration_type = :integration_type
+                          AND status IN ('ingested', 'preprocessed', 'preprocessing');
+                        """
+                    ),
+                    {
+                        "integration_provider": integration_provider,
+                        "integration_type": integration_type,
+                    },
+                )
+                last_ingestion_event_created_at = result.scalar()
 
+                if last_ingestion_event_created_at is None:
+                    return None
+
+                # SQLAlchemy may already give us a datetime; if it's a string, parse it.
+                if isinstance(last_ingestion_event_created_at, datetime):
+                    return last_ingestion_event_created_at
+
+                # Fallback: attempt to parse common SQL datetime string formats.
+                text_val = str(last_ingestion_event_created_at)
+                try:
+                    return datetime.fromisoformat(text_val)
+                except ValueError:
+                    # e.g. '2025-12-08 14:18:52.123456'
+                    return datetime.strptime(text_val, "%Y-%m-%d %H:%M:%S.%f")
+        except Exception as e:
+            logger.error("Error getting last ingestion event created_at date: %s", e)
+            raise

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -93,13 +94,16 @@ def test_get_token_builds_odbc_token():
 
 
 class DummyResult:
-    def __init__(self, row_value: str | None = None):
+    def __init__(self, row_value: object | None = None):
         self._row_value = row_value
 
     def first(self):
         if self._row_value is None:
             return None
         return (self._row_value,)
+
+    def scalar(self):
+        return self._row_value
 
 
 class DummyConnection:
@@ -272,3 +276,156 @@ def test_update_ingestion_event_error(monkeypatch):
         )
 
 
+def test_get_last_ingestion_event_created_at_returns_none(monkeypatch):
+    """
+    get_last_ingestion_event_created_at
+    - must return None when the query result is NULL
+    """
+    conn = DummyConnection(row_value=None)
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    result = client.get_last_ingestion_event_created_at(
+        integration_provider="rugby365",
+        integration_type="results",
+    )
+
+    assert result is None
+
+
+def test_get_last_ingestion_event_created_at_returns_datetime_direct(monkeypatch):
+    """
+    get_last_ingestion_event_created_at
+    - must return a datetime unchanged when the DB already returns a datetime value
+    """
+    dt = datetime(2025, 12, 8, 14, 30, 0)
+    conn = DummyConnection(row_value=dt)
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    result = client.get_last_ingestion_event_created_at(
+        integration_provider="rugby365",
+        integration_type="results",
+    )
+
+    assert isinstance(result, datetime)
+    assert result == dt
+
+
+def test_get_last_ingestion_event_created_at_parses_iso_string(monkeypatch):
+    """
+    get_last_ingestion_event_created_at
+    - must parse common ISO datetime string values returned by SQL
+    """
+    value = "2025-12-08T14:18:52.123456"
+    conn = DummyConnection(row_value=value)
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    result = client.get_last_ingestion_event_created_at(
+        integration_provider="rugby365",
+        integration_type="results",
+    )
+
+    assert isinstance(result, datetime)
+    assert result == datetime.fromisoformat(value)
+
+
+def test_sql_client_connection_retries_then_succeeds(monkeypatch):
+    """
+    SqlClient __init__ connection factory
+    - must retry transient connection failures and eventually succeed
+    """
+    attempts = {"count": 0}
+    sleeps: list[int] = []
+    created: dict = {}
+
+    class FakeCredential:
+        def get_token(self, scope: str):
+            created["scope"] = scope
+            return SimpleNamespace(token="dummy-token")
+
+    def flaky_connect(*_args, **_kwargs):
+        attempts["count"] += 1
+        # Fail the first two attempts, succeed on the third.
+        if attempts["count"] < 3:
+            raise RuntimeError("temporary connect error")
+        return SimpleNamespace(closed=False)
+
+    def fake_create_engine(url: str, creator, pool_pre_ping: bool):
+        created["url"] = url
+        created["pool_pre_ping"] = pool_pre_ping
+        created["creator"] = creator
+        # Engine itself is not exercised in this test, but must be constructible.
+        return DummyEngine(DummyConnection())
+
+    monkeypatch.setattr(sql_mod, "DefaultAzureCredential", FakeCredential)
+    monkeypatch.setattr(sql_mod.sa, "create_engine", fake_create_engine)
+    monkeypatch.setattr(
+        sql_mod,
+        "pyodbc",
+        SimpleNamespace(connect=flaky_connect),
+    )
+    monkeypatch.setattr(sql_mod.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    settings = DummySettings()
+    client = sql_mod.SqlClient(settings)
+
+    # Exercise the captured creator to trigger the retry loop.
+    creator = created["creator"]
+    conn = creator()
+
+    assert isinstance(client.credential, FakeCredential)
+    assert created["url"] == "mssql+pyodbc://"
+    assert created["pool_pre_ping"] is True
+    assert created["scope"] == "https://database.windows.net/.default"
+    assert attempts["count"] == 3
+    assert isinstance(conn, SimpleNamespace)
+    # Backoff should have slept between failed attempts: 5s then 10s.
+    assert sleeps == [5, 10]
+
+
+def test_sql_client_connection_retries_and_raises(monkeypatch):
+    """
+    SqlClient __init__ connection factory
+    - must give up and surface the last exception after max retries
+    """
+    attempts = {"count": 0}
+    sleeps: list[int] = []
+    created: dict = {}
+
+    class FakeCredential:
+        def get_token(self, scope: str):
+            created["scope"] = scope
+            return SimpleNamespace(token="dummy-token")
+
+    def always_failing_connect(*_args, **_kwargs):
+        attempts["count"] += 1
+        raise RuntimeError("permanent connect error")
+
+    def fake_create_engine(url: str, creator, pool_pre_ping: bool):
+        created["url"] = url
+        created["pool_pre_ping"] = pool_pre_ping
+        created["creator"] = creator
+        return DummyEngine(DummyConnection())
+
+    monkeypatch.setattr(sql_mod, "DefaultAzureCredential", FakeCredential)
+    monkeypatch.setattr(sql_mod.sa, "create_engine", fake_create_engine)
+    monkeypatch.setattr(
+        sql_mod,
+        "pyodbc",
+        SimpleNamespace(connect=always_failing_connect),
+    )
+    monkeypatch.setattr(sql_mod.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    settings = DummySettings()
+    sql_mod.SqlClient(settings)
+
+    creator = created["creator"]
+    with pytest.raises(RuntimeError) as exc:
+        creator()
+
+    assert "permanent connect error" in str(exc.value)
+    # Should have attempted the connection max_attempts times (3), with two sleeps.
+    assert attempts["count"] == 3
+    assert sleeps == [5, 10]

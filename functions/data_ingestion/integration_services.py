@@ -8,8 +8,7 @@ from azure.storage.blob import BlobClient
 
 from functions.data_ingestion.integration_helpers import (
     download_historical_results,
-    scrape_results,
-    scrape_fixtures,
+    scrape_values,
 )
 from functions.config.settings import get_settings
 from functions.logging.logger import get_logger
@@ -160,25 +159,32 @@ class ScrapeResultsOrFixturesStep:
         # Populate integration metadata for this source.
         integration_provider = context["integration_provider"]
         integration_type = context["integration_type"]
+        sql_client = context["sql_client"]
 
         try:
-            if integration_type == "results":
-                local_file_path, integration_dataset = scrape_results(integration_provider)
-            elif integration_type == "fixtures":
-                local_file_path, integration_dataset = scrape_fixtures(integration_provider)
-            else:
-                raise ValueError(f"Unsupported integration type: {integration_type!r}")
-
+            # scrape the values for the given provider and type
+            local_file_path, integration_dataset = scrape_values(integration_provider, integration_type, sql_client)
+            # if there are no local file path or integration dataset, raise a ValueError
             context["local_integration_file_path"] = local_file_path
             context["integration_dataset"] = integration_dataset
             context["status"] = "started"
-        except Exception as e:
-            logger.error("Error scraping %s data for provider=%s: %s", integration_type, provider, e)
+        except ValueError as e:
+            logger.error("Error scraping values for provider=%s and type=%s: %s", provider, integration_type, e)
             context["status"] = "failed"
             context["error_message"] = str(e)
+            raise
+        except Exception as e:
+            logger.error(
+                "Unexpected error scraping values for provider=%s and type=%s: %s",
+                provider,
+                integration_type,
+                e,
+            )
+            context["status"] = "failed"
+            context["error_message"] = str(e)
+            raise
 
         return context
-
 
 class WriteRawSnapshotsToBlobStep:
     """
@@ -221,7 +227,9 @@ class WriteRawSnapshotsToBlobStep:
                 blob_name=blob_name,
             )
 
-            blob_client.upload_blob(local_path, overwrite=True)
+            # Upload the actual file contents, not just the local path string.
+            with open(local_path, "rb") as data:
+                blob_client.upload_blob(data, overwrite=True)
 
             context["blob_snapshot_uri"] = blob_name
             # mark success if not already failed by earlier steps
