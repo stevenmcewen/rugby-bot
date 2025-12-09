@@ -8,7 +8,7 @@ from functions.data_ingestion.integration_services import (
     ingest_rugby365_fixtures,
     ingest_rugby365_results,
 )
-from functions.data_preprocessing.services import build_feature_tables
+from functions.data_preprocessing.services import orchestrate_preprocessing
 from functions.logging.logger import get_logger
 from functions.ml_models.services import score_upcoming_matches, train_models
 from functions.notifications.services import (
@@ -160,45 +160,44 @@ def IngestRugby365FixturesFunction(timer: func.TimerRequest) -> None:
         )
         raise
 
-# # Build feature tables from the ingested data.
-# @app.schedule(
-#     schedule="0 0 3 * * *",  # 03:00 UTC daily, after ingestion
-#     arg_name="timer",
-#     run_on_startup=False,
-#     use_monitor=True,
-# )
-# def BuildFeatureTablesFunction(timer: func.TimerRequest) -> None:
-#     """
-#     Preprocessing (Silver):
-#     Read raw data from Blob (bronze), transform into clean tabular schemas,
-#     and write model-ready tables to Azure SQL (silver) using managed identity.
-#     """
-#     if not settings.enable_scheduled_functions:
-#         logger.info("BuildFeatureTablesFunction skipped (scheduled functions disabled).")
-#         return
+# Preprocess the ingested data from bronze to silver.
+@app.schedule(
+    schedule="0 0 3 * * *",  # 03:00 UTC daily, after ingestion
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def PreprocessBronzeToSilver(timer: func.TimerRequest) -> None:
+    """
+    Preprocessing (Silver):
+    Read raw data from Blob (bronze), transform into clean tabular schemas,
+    and write model-ready tables to Azure SQL (silver) using managed identity.
+    """
+    logger.info("PreprocessBronzeToSilver triggered.")
 
-#     logger.info("BuildFeatureTablesFunction triggered.")
+    system_event = sql_client.start_system_event(
+        function_name="PreprocessBronzeToSilver",
+        trigger_type="timer",
+        event_type="preprocessing",
+    )
 
-#     system_event = sql_client.start_system_event(
-#         function_name="BuildFeatureTablesFunction",
-#         trigger_type="timer",
-#         event_type="preprocessing",
-#     )
-
-#     try:
-#         build_feature_tables()
-#         sql_client.complete_system_event(
-#             system_event_id=system_event.id,
-#             status="succeeded",
-#         )
-#     except Exception as exc:  # pragma: no cover - defensive logging
-#         logger.exception("BuildFeatureTablesFunction failed.")
-#         sql_client.complete_system_event(
-#             system_event_id=system_event.id,
-#             status="failed",
-#             details=str(exc),
-#         )
-#         raise
+    try:
+        orchestrate_preprocessing(
+            sql_client=sql_client, 
+            system_event_id=system_event.id
+        )
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc:
+        logger.exception("PreprocessBronzeToSilver failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
 
 
 # # Train models on the feature tables.

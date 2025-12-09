@@ -370,3 +370,214 @@ class SqlClient:
         except Exception as e:
             logger.error("Error getting last ingestion event created_at date: %s", e)
             raise
+
+    ## ingestion source helpers ###
+    def get_ingestion_events_by_status(
+        self,
+        status: str,
+    ) -> list[dict]:
+        """
+        Get the ingestion_events with the given status and return them as a list of dictionaries.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT id, batch_id, system_event_id, integration_type, integration_provider, container_name, blob_path
+                        FROM dbo.ingestion_events
+                        WHERE status = :status;
+                        """
+                    ),
+                    {
+                        "status": status,
+                    },
+                )
+                return result.fetchall()
+        except Exception as e:
+            logger.error("Error getting ingestion_events with status='%s': %s", status, e)
+            raise
+
+    ## source target mapping helpers ###
+    def get_source_target_mapping(
+        self,
+        source_provider: str,
+        source_type: str,
+    ) -> list[dict]:
+        """
+        Get the source_target_mappings for a given source provider and type.
+        Return the source_target_mapping as a list of dictionaries.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT source_provider, source_type, target_table, pipeline_name
+                        FROM dbo.preprocessing_source_target_mappings
+                        WHERE source_provider = :source_provider AND source_type = :source_type;
+                        """
+                    ),
+                    {
+                        "source_provider": source_provider,
+                        "source_type": source_type,
+                    },
+                )
+                rows = result.fetchall()
+                source_target_mappings = []
+                for row in rows:
+                    source_target_mapping = {
+                        "source_provider": row[0],
+                        "source_type": row[1],
+                        "target_table": row[2],
+                        "pipeline_name": row[3],
+                    }
+                    source_target_mappings.append(source_target_mapping)
+                return source_target_mappings
+        except Exception as e:
+            logger.error("Error getting source_target_mappings for source_provider='%s' and source_type='%s': %s", source_provider, source_type, e)
+            raise
+
+    
+    ## preprocessing event helpers ###
+    def create_preprocessing_event(
+        self,
+        *,
+        preprocessing_plan: PreprocessingPlan,
+    ) -> dict:
+        """
+        Create a new row in dbo.preprocessing_events and return it as a dictionary.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        INSERT INTO dbo.preprocessing_events (
+                            batch_id,
+                            system_event_id,
+                            integration_type,
+                            integration_provider,
+                            container_name,
+                            blob_path,
+                            target_table,
+                            pipeline_name,
+                            status,
+                            error_message
+                        )
+                        OUTPUT INSERTED.id
+                        VALUES (
+                            :batch_id,
+                            :system_event_id,
+                            :integration_type,
+                            :integration_provider,
+                            :container_name,
+                            :blob_path,
+                            :target_table,
+                            :pipeline_name,
+                            :status,
+                            :error_message
+                        );
+                        """
+                    ),
+                    {
+                        "batch_id": preprocessing_plan.batch_id,
+                        "system_event_id": preprocessing_plan.system_event_id,
+                        "integration_type": preprocessing_plan.integration_type,
+                        "integration_provider": preprocessing_plan.integration_provider,
+                        "container_name": preprocessing_plan.container_name,
+                        "blob_path": preprocessing_plan.blob_path,
+                        "target_table": preprocessing_plan.target_table,
+                        "pipeline_name": preprocessing_plan.pipeline_name,
+                        "status": "started",
+                        "error_message": None,
+                    },
+                )
+                row = result.first()
+                conn.commit()
+                preprocessing_event_id = UUID(str(row[0]))
+                event_details = {
+                    "id": preprocessing_event_id,
+                    "batch_id": preprocessing_plan.batch_id,
+                    "system_event_id": preprocessing_plan.system_event_id,
+                    "integration_type": preprocessing_plan.integration_type,
+                    "integration_provider": preprocessing_plan.integration_provider,
+                    "container_name": preprocessing_plan.container_name,
+                    "blob_path": preprocessing_plan.blob_path,
+                    "target_table": preprocessing_plan.target_table,
+                    "pipeline_name": preprocessing_plan.pipeline_name,
+                    "status": "started",
+                    "error_message": None,
+                }
+                logger.info(
+                    "Created preprocessing event id=%s",
+                    preprocessing_event_id,
+                )
+                return event_details
+        except Exception as e:
+            logger.error("Error creating preprocessing event: %s", e)
+            raise
+
+    def update_preprocessing_event(
+        self,
+        *,
+        preprocessing_event_id: UUID,
+        status: str,
+        error_message: str|None = None,
+    ) -> None:
+        """
+        Update an existing dbo.preprocessing_events row.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        UPDATE dbo.preprocessing_events
+                        SET status = :status,
+                            error_message = :error_message
+                        WHERE id = :preprocessing_event_id;
+                        """
+                    ),
+                    {
+                        "status": status,
+                        "error_message": error_message,
+                        "preprocessing_event_id": preprocessing_event_id,
+                    },
+                )
+                conn.commit()
+                logger.info(
+                    "Updated preprocessing event id=%s with status=%s error=%s",
+                    preprocessing_event_id,
+                    status,
+                    error_message,
+                )
+        except Exception as e:
+            logger.error("Error updating preprocessing event: %s", e)
+
+    def get_preprocessing_events_by_batch_id(
+        self,
+        batch_id: UUID,
+    ) -> list[dict]:
+        """
+        Get the preprocessing_events for a given batch id.
+        Return the preprocessing_events as a list of dictionaries.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT id, batch_id, system_event_id, integration_type, integration_provider, container_name, blob_path, target_table, pipeline_name, status, error_message
+                        FROM dbo.preprocessing_events
+                        WHERE batch_id = :batch_id;
+                        """
+                    ),
+                    {
+                        "batch_id": batch_id,
+                    },
+                )
+                return result.fetchall()
+        except Exception as e:
+            logger.error("Error getting preprocessing events with batch_id='%s': %s", batch_id, e)
+            raise

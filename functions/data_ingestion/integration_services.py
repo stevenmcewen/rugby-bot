@@ -21,7 +21,7 @@ settings = get_settings()
 IngestionContext = dict[str, Any]
 
 
-#### Pipeline core ####
+#### Pipeline step interface ####
 class IngestionStep(Protocol):
     """
     A single ingestion step in the pipeline.
