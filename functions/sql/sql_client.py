@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
+import time
 import sqlalchemy as sa
 from azure.identity import DefaultAzureCredential
 import pyodbc
@@ -60,12 +61,36 @@ class SqlClient:
             Factory used by SQLAlchemy for each new DBAPI connection.
 
             This ensures we always attach a current access token and
-            avoid token‑expiry issues with long‑lived pools.
+            avoid token‑expiry issues with long‑lived pools. It also
+            adds some basic retry logic to improve resilience during
+            cold starts (e.g. when SQL or managed identity is still
+            waking up).
             """
-            return pyodbc.connect(
-                odbc_conn_str,
-                attrs_before=self.get_token(),
-            )
+            max_attempts = 3
+            delay_seconds = 5
+            last_exc: Exception | None = None
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return pyodbc.connect(
+                        odbc_conn_str,
+                        attrs_before=self.get_token(),
+                    )
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "SQL connection attempt %s/%s failed: %s",
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    if attempt < max_attempts:
+                        time.sleep(delay_seconds)
+                        # exponential backoff pattern
+                        delay_seconds *= 2
+
+            logger.error("SQL connection failed after %s attempts", max_attempts)
+            raise last_exc
 
         self.engine = sa.create_engine(
             "mssql+pyodbc://",

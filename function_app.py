@@ -93,7 +93,7 @@ def IngestHistoricalKaggleResults(req: func.HttpRequest) -> func.HttpResponse:
 
 # Ingest Rugby365 results data into the database.
 @app.schedule(
-    schedule="0 0 1 * * *", 
+    schedule="0 0 1 * * *", # 01:00 UTC daily
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
@@ -117,7 +117,7 @@ def IngestRugby365ResultsFunction(timer: func.TimerRequest) -> None:
             system_event_id=system_event.id,
             status="succeeded",
         )
-    except Exception as exc:  # pragma: no cover - defensive logging
+    except Exception as exc: 
         logger.exception("IngestRugby365ResultsFunction failed.")
         sql_client.complete_system_event(
             system_event_id=system_event.id,
@@ -125,46 +125,40 @@ def IngestRugby365ResultsFunction(timer: func.TimerRequest) -> None:
             details=str(exc),
         )
 
+# Ingest Rugby365 fixtures data into the database.
+@app.schedule(
+    schedule="0 30 1 * * *",  # 01:30 UTC daily
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def IngestRugby365FixturesFunction(timer: func.TimerRequest) -> None:
+    """
+    Ingest Rugby365 fixtures data into the database.
+    """
 
+    logger.info("IngestRugby365FixturesFunction triggered.")
 
-# # Ingest Rugby365 fixtures data into the database.
-# @app.schedule(
-#     schedule="0 0 1 * * *",  # 01:00 UTC daily
-#     arg_name="timer",
-#     run_on_startup=False,
-#     use_monitor=True,
-# )
-# def IngestRugby365FixturesFunction(timer: func.TimerRequest) -> None:
-#     """
-#     Ingest Rugby365 fixtures data into the database.
-#     """
-#     if not settings.enable_scheduled_functions:
-#         logger.info("IngestRugby365FixturesFunction skipped (scheduled functions disabled).")
-#         return
+    system_event = sql_client.start_system_event(
+        function_name="IngestRugby365FixturesFunction",
+        trigger_type="timer",
+        event_type="ingestion",
+    )
 
-#     logger.info("IngestRugby365FixturesFunction triggered.")
-
-#     system_event = sql_client.start_system_event(
-#         function_name="IngestRugby365FixturesFunction",
-#         trigger_type="timer",
-#         event_type="ingestion",
-#     )
-
-#     try:
-#         ingest_rugby365_fixtures(sql_client=sql_client, system_event_id=system_event.id)
-#         sql_client.complete_system_event(
-#             system_event_id=system_event.id,
-#             status="succeeded",
-#         )
-#     except Exception as exc:  # pragma: no cover - defensive logging
-#         logger.exception("IngestRugby365FixturesFunction failed.")
-#         sql_client.complete_system_event(
-#             system_event_id=system_event.id,
-#             status="failed",
-#             details=str(exc),
-#         )
-#         raise
-
+    try:
+        ingest_rugby365_fixtures(sql_client=sql_client, system_event_id=system_event.id)
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc: 
+        logger.exception("IngestRugby365FixturesFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
 
 # # Build feature tables from the ingested data.
 # @app.schedule(
