@@ -8,6 +8,7 @@ import sqlalchemy as sa
 from azure.identity import DefaultAzureCredential
 import pyodbc
 import struct 
+import pandas as pd
 
 from functions.config.settings import AppSettings
 from functions.logging.logger import get_logger
@@ -96,6 +97,7 @@ class SqlClient:
             "mssql+pyodbc://",
             creator=_get_connection,
             pool_pre_ping=True,
+            fast_executemany=True,
         )
 
         logger.info(
@@ -369,4 +371,446 @@ class SqlClient:
                     return datetime.strptime(text_val, "%Y-%m-%d %H:%M:%S.%f")
         except Exception as e:
             logger.error("Error getting last ingestion event created_at date: %s", e)
+            raise
+
+    ## ingestion source helpers ###
+    def get_ingestion_events_by_status(
+        self,
+        status: str,
+    ) -> list[dict]:
+        """
+        Get the ingestion_events with the given status and return them as a list of dictionaries.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT id, batch_id, system_event_id, integration_type, integration_provider, container_name, blob_path
+                        FROM dbo.ingestion_events
+                        WHERE status = :status;
+                        """
+                    ),
+                    {
+                        "status": status,
+                    },
+                )
+                return result.fetchall()
+        except Exception as e:
+            logger.error("Error getting ingestion_events with status='%s': %s", status, e)
+            raise
+
+    ## source target mapping helpers ###
+    def get_source_target_mapping(
+        self,
+        source_provider: str,
+        source_type: str,
+    ) -> list[dict]:
+        """
+        Get the source_target_mappings for a given source provider and type.
+        Return the source_target_mapping as a list of dictionaries.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT source_provider, source_type, target_table, pipeline_name
+                        FROM dbo.preprocessing_source_target_mappings
+                        WHERE source_provider = :source_provider AND source_type = :source_type;
+                        """
+                    ),
+                    {
+                        "source_provider": source_provider,
+                        "source_type": source_type,
+                    },
+                )
+                rows = result.fetchall()
+                source_target_mappings = []
+                for row in rows:
+                    source_target_mapping = {
+                        "source_provider": row[0],
+                        "source_type": row[1],
+                        "target_table": row[2],
+                        "pipeline_name": row[3],
+                    }
+                    source_target_mappings.append(source_target_mapping)
+                return source_target_mappings
+        except Exception as e:
+            logger.error("Error getting source_target_mappings for source_provider='%s' and source_type='%s': %s", source_provider, source_type, e)
+            raise
+
+    
+    ## preprocessing event helpers ###
+    def create_preprocessing_event(
+        self,
+        *,
+        preprocessing_plan: PreprocessingPlan,
+    ) -> dict:
+        """
+        Create a new row in dbo.preprocessing_events and return it as a dictionary.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        INSERT INTO dbo.preprocessing_events (
+                            batch_id,
+                            system_event_id,
+                            integration_type,
+                            integration_provider,
+                            container_name,
+                            blob_path,
+                            target_table,
+                            pipeline_name,
+                            status,
+                            error_message
+                        )
+                        OUTPUT INSERTED.id
+                        VALUES (
+                            :batch_id,
+                            :system_event_id,
+                            :integration_type,
+                            :integration_provider,
+                            :container_name,
+                            :blob_path,
+                            :target_table,
+                            :pipeline_name,
+                            :status,
+                            :error_message
+                        );
+                        """
+                    ),
+                    {
+                        "batch_id": preprocessing_plan.batch_id,
+                        "system_event_id": preprocessing_plan.system_event_id,
+                        "integration_type": preprocessing_plan.integration_type,
+                        "integration_provider": preprocessing_plan.integration_provider,
+                        "container_name": preprocessing_plan.container_name,
+                        "blob_path": preprocessing_plan.blob_path,
+                        "target_table": preprocessing_plan.target_table,
+                        "pipeline_name": preprocessing_plan.pipeline_name,
+                        "status": "started",
+                        "error_message": None,
+                    },
+                )
+                row = result.first()
+                conn.commit()
+                preprocessing_event_id = UUID(str(row[0]))
+                event_details = {
+                    "id": preprocessing_event_id,
+                    "batch_id": preprocessing_plan.batch_id,
+                    "system_event_id": preprocessing_plan.system_event_id,
+                    "integration_type": preprocessing_plan.integration_type,
+                    "integration_provider": preprocessing_plan.integration_provider,
+                    "container_name": preprocessing_plan.container_name,
+                    "blob_path": preprocessing_plan.blob_path,
+                    "target_table": preprocessing_plan.target_table,
+                    "pipeline_name": preprocessing_plan.pipeline_name,
+                    "status": "started",
+                    "error_message": None,
+                }
+                logger.info(
+                    "Created preprocessing event id=%s",
+                    preprocessing_event_id,
+                )
+                return event_details
+        except Exception as e:
+            logger.error("Error creating preprocessing event: %s", e)
+            raise
+
+    def update_preprocessing_event(
+        self,
+        *,
+        preprocessing_event_id: UUID,
+        status: str,
+        error_message: str|None = None,
+    ) -> None:
+        """
+        Update an existing dbo.preprocessing_events row.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        UPDATE dbo.preprocessing_events
+                        SET status = :status,
+                            error_message = :error_message
+                        WHERE id = :preprocessing_event_id;
+                        """
+                    ),
+                    {
+                        "status": status,
+                        "error_message": error_message,
+                        "preprocessing_event_id": preprocessing_event_id,
+                    },
+                )
+                conn.commit()
+                logger.info(
+                    "Updated preprocessing event id=%s with status=%s error=%s",
+                    preprocessing_event_id,
+                    status,
+                    error_message,
+                )
+        except Exception as e:
+            logger.error("Error updating preprocessing event: %s", e)
+
+    def get_preprocessing_events_by_batch_id(
+        self,
+        batch_id: UUID,
+    ) -> list[dict]:
+        """
+        Get the preprocessing_events for a given batch id.
+        Return the preprocessing_events as a list of dictionaries.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT id, batch_id, system_event_id, integration_type, integration_provider, container_name, blob_path, target_table, pipeline_name, status, error_message
+                        FROM dbo.preprocessing_events
+                        WHERE batch_id = :batch_id;
+                        """
+                    ),
+                    {
+                        "batch_id": batch_id,
+                    },
+                )
+                return result.fetchall()
+        except Exception as e:
+            logger.error("Error getting preprocessing events with batch_id='%s': %s", batch_id, e)
+            raise
+
+    ## schema helpers ###
+    def get_schema(
+        self,
+        *,
+        table_name: str | None = None,
+        integration_type: str | None = None,
+        integration_provider: str | None = None,
+    ) -> list[dict]:
+        """
+        Get the logical schema (table + columns) from dbo.schema_tables
+        and dbo.schema_columns.
+
+        You can look up a schema in two main ways:
+
+        - By physical table name: (This would be helpful for target tables)
+            get_schema(table_name="dbo.rugby_results_clean")
+
+        - By integration metadata: (This would be helpful for source tables)
+            get_schema(
+                integration_type="historical_results",
+                integration_provider="kaggle",
+            )
+
+        Any combination of the filters provided will be AND-ed together.
+
+        Returns:
+            list[dict]: One dict per column with keys:
+                - table_id
+                - table_name
+                - integration_type
+                - integration_provider
+                - description
+                - column_id
+                - column_name
+                - data_type
+                - is_required
+                - ordinal_position
+                - max_length
+                - numeric_precision
+                - numeric_scale
+        """
+        if not any([table_name, integration_type, integration_provider]):
+            raise ValueError(
+                "At least one of table_name, integration_type, or "
+                "integration_provider must be provided to get_schema()."
+            )
+
+        where_clauses: list[str] = []
+        params: dict[str, object] = {}
+        ## build the where clause based on the filters provided
+        if table_name is not None:
+            where_clauses.append("st.table_name = :table_name")
+            params["table_name"] = table_name
+
+        if integration_type is not None:
+            where_clauses.append("st.integration_type = :integration_type")
+            params["integration_type"] = integration_type
+
+        if integration_provider is not None:
+            where_clauses.append("st.integration_provider = :integration_provider")
+            params["integration_provider"] = integration_provider
+
+        where_sql = ""
+        # start the where clause with "WHERE" and join the other where clauses with "AND" if there are any
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+
+        query = f"""
+            SELECT
+                st.id                  AS table_id,
+                st.table_name          AS table_name,
+                st.integration_type    AS integration_type,
+                st.integration_provider AS integration_provider,
+                st.description         AS description,
+                sc.id                  AS column_id,
+                sc.column_name         AS column_name,
+                sc.data_type           AS data_type,
+                sc.is_required         AS is_required,
+                sc.ordinal_position    AS ordinal_position,
+                sc.max_length          AS max_length,
+                sc.numeric_precision   AS numeric_precision,
+                sc.numeric_scale       AS numeric_scale
+            FROM dbo.schema_tables AS st
+            JOIN dbo.schema_columns AS sc
+              ON sc.table_id = st.id
+            {where_sql}
+            ORDER BY
+                st.id,
+                sc.ordinal_position,
+                sc.column_name;
+        """
+        # execute the query and return the result
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(sa.text(query), params)
+                rows = result.fetchall()
+
+                if not rows:
+                    logger.warning(
+                        "No schema rows found for filters: "
+                        "table_name=%s, integration_type=%s, integration_provider=%s",
+                        table_name,
+                        integration_type,
+                        integration_provider,
+                    )
+                    return []
+
+                schema: list[dict] = []
+                for row in rows:
+                    schema.append(
+                        {
+                            "table_id": row.table_id,
+                            "table_name": row.table_name,
+                            "integration_type": row.integration_type,
+                            "integration_provider": row.integration_provider,
+                            "description": row.description,
+                            "column_id": row.column_id,
+                            "column_name": row.column_name,
+                            "data_type": row.data_type,
+                            "is_required": bool(row.is_required),
+                            "ordinal_position": row.ordinal_position,
+                            "max_length": row.max_length,
+                            "numeric_precision": row.numeric_precision,
+                            "numeric_scale": row.numeric_scale,
+                        }
+                    )
+                return schema
+        except Exception as e:
+            logger.error(
+                "Error getting schema for table_name='%s', integration_type='%s', integration_provider='%s': %s",
+                table_name,
+                integration_type,
+                integration_provider,
+                e,
+            )
+            raise
+
+    ## generic data write helpers ###
+    def write_dataframe_to_table(
+        self,
+        df: "pd.DataFrame",
+        table_name: str,
+        if_exists: str = "append",
+    ) -> None:
+        """
+        Append the rows of a pandas DataFrame into a target SQL table.
+
+        Args:
+            df: The DataFrame to persist.
+            table_name: The fully‑qualified table name, e.g. "dbo.matches".
+            if_exists: Behaviour if the table already exists. Defaults to
+                "append".
+        """
+
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("write_dataframe_to_table expected a pandas DataFrame")
+        
+        # tables will default to dbo schema if no schema is provided
+        schema = "dbo"
+        table = table_name
+
+        # If someome provides a schema in the table name we will use it, otherwise we will use the default schema of dbo
+        if "." in table_name:
+            schema, table = table_name.split(".", 1)
+        try:
+            if df.empty:
+                logger.info(
+                    "write_dataframe_to_table: no rows to insert for table %s (schema=%s); skipping",
+                    table,
+                    schema,
+                )
+                return
+
+            # get the number of rows before the insert
+            rows_before = len(df)
+            # We chunk rows for practical reasons (memory/latency). 
+            chunksize = 1000
+
+            # insert the data into the table
+            df.to_sql(
+                name=table,
+                con=self.engine,
+                schema=schema,
+                if_exists=if_exists,
+                index=False,
+                chunksize=chunksize,
+            )
+        except Exception as e:
+            logger.error("Error writing DataFrame to table %s: %s", table_name, e)
+            raise
+
+    ## venue database helpers ###
+    def get_venue_database(self) -> pd.DataFrame:
+        """
+        Load the rugby venue lookup table as a pandas DataFrame.
+
+        Returns:
+            pd.DataFrame with columns:
+                - venue   (str): venue name as used in source data
+                - city    (str): city where the venue is located
+                - country (str): country where the venue is located
+
+        Notes:
+            - Only rows with IsActive = 1 are returned.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(sa.text(
+                    """
+                    SELECT
+                        VenueName AS venue,
+                        City      AS city,
+                        Country   AS country
+                    FROM dbo.RugbyVenues
+                    WHERE IsActive = 1;
+                    """
+                ))
+                rows = result.fetchall()
+
+            if not rows:
+                logger.warning("get_venue_database: no rows found in dbo.RugbyVenues")
+                # Return an empty DataFrame with the expected columns
+                return pd.DataFrame(columns=["venue", "city", "country"])
+
+            df = pd.DataFrame(rows, columns=result.keys())
+            return df
+
+        except Exception as e:
+            logger.error("Error loading venue database from dbo.RugbyVenues: %s", e)
             raise
