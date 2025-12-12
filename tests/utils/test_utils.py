@@ -1,5 +1,6 @@
 from datetime import date
 
+import pandas as pd
 import pytest
 
 from functions.utils import utils
@@ -35,5 +36,10 @@ def test_to_date_range_start_after_end_raises_value_error():
 
     with pytest.raises(ValueError):
         utils.to_date_range(start, end)
+
+
+def test_matches_type_unknown_expected_returns_false():
+    s = pd.Series([1, 2, 3])
+    assert utils.matches_type(s, "datetime") is False
 
 

@@ -7,13 +7,11 @@ from uuid import UUID
 from functions.config.settings import get_settings
 from functions.logging.logger import get_logger
 from functions.sql.sql_client import SqlClient
-from functions.data_preprocessing.preprocessing_helpers import run_preprocessing_pipeline
+from functions.data_preprocessing.preprocessing_pipelines import run_preprocessing_pipeline
 
 
 logger = get_logger(__name__)
 settings = get_settings()
-
-
 
 PreprocessingContext = dict[str, Any]
 
@@ -199,7 +197,7 @@ class PersistPreprocessingEventsStep:
             preprocessing_plans = context["preprocessing_plans"]
             preprocessing_events = []
             for preprocessing_plan in preprocessing_plans:
-                preprocessing_event_details = sql_client.create_preprocessing_event(preprocessing_plan)
+                preprocessing_event_details = sql_client.create_preprocessing_event(preprocessing_plan=preprocessing_plan)
                 preprocessing_event = PreprocessingEvent(
                     id=preprocessing_event_details["id"],
                     batch_id=preprocessing_event_details["batch_id"],
@@ -236,7 +234,7 @@ class RunPreprocessingPipelinesStep:
         try:
             sql_client: SqlClient = context["sql_client"]
             for preprocessing_event in preprocessing_events:
-                run_preprocessing_pipeline(preprocessing_event)
+                run_preprocessing_pipeline(preprocessing_event, sql_client)
                 if preprocessing_event.status == "succeeded":
                     sql_client.update_preprocessing_event(preprocessing_event_id=preprocessing_event.id, status="succeeded")
                 else:
@@ -244,11 +242,11 @@ class RunPreprocessingPipelinesStep:
             # update the ingestion event status to 'preprocessed' if the preprocessing event status is 'succeeded' for all the preprocessing events for the ingestion event
             for ingestion_source in ingestion_sources:
                 preprocessing_events = sql_client.get_preprocessing_events_by_batch_id(batch_id=ingestion_source.batch_id)
-                if all(preprocessing_event["status"] == "succeeded" for preprocessing_event in preprocessing_events):
+                # SQLAlchemy returns row objects here, so access columns by attribute
+                if all(preprocessing_event.status == "succeeded" for preprocessing_event in preprocessing_events):
                     sql_client.update_ingestion_event(ingestion_event_id=ingestion_source.id, status="preprocessed", error_message=None)
                 else:
                     sql_client.update_ingestion_event(ingestion_event_id=ingestion_source.id, status="failed to preprocess", error_message="Preprocessing failed for some preprocessing events for this batch")
-                    raise Exception("Preprocessing failed for some preprocessing events for this batch")
         except Exception as e:
             logger.error("Error running preprocessing pipelines: %s", e)
             raise

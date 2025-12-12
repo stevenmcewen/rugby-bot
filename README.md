@@ -79,6 +79,24 @@ Instead, it uses a small data access layer (`SqlClient` in `functions/sql/sql_cl
 
 The goal is to treat the database not just as storage, but also as the “control plane” for long‑running ingestion pipelines: transparent, queryable, and easy to debug.
 
+### Data Access and Event Tracking Philosophy
+
+At runtime, the Functions code never talks directly to Azure SQL with ad-hoc connection strings.  
+Instead, it uses a small data access layer (`SqlClient` in `functions/sql/sql_client.py`) that:
+
+- **Centralises how we talk to the database** so every function (ingestion, preprocessing, modelling, notifications) uses the same, tested path to SQL.
+- **Uses managed identity under the hood** so credentials are never checked into source control or stored in configuration – they live only in Entra ID.
+- **Records high-level “system events” and detailed pipeline events** in SQL whenever functions run or batches are processed, giving us an audit trail of:
+  - which function ran,
+  - which data batches were ingested or preprocessed,
+  - which logical tables and schemas are in play,
+  - and whether they succeeded, are in progress, or failed.
+- **Supports orchestration-by-metadata**: downstream jobs (e.g. preprocessing, feature building) discover what to work on by querying these event and metadata tables, rather than by being tightly coupled to the ingestion or modelling code.
+
+The goal is to treat the database not just as storage, but also as the **control plane** for long-running ingestion pipelines: transparent, queryable, and easy to debug.
+
+---
+
 ### Event and Ingestion Metadata Tables
 
 To coordinate work between ingestion, preprocessing, and other functions, the system uses a small hierarchy of SQL tables:
@@ -92,6 +110,7 @@ To coordinate work between ingestion, preprocessing, and other functions, the sy
     - `event_type` – semantic label, e.g. `ingestion`, `preprocessing`.
     - `status` – e.g. `started`, `succeeded`, `failed`.
     - `started_at`, `completed_at`, `created_at` – UTC timestamps.
+
 - `dbo.ingestion_events`: **detailed ingestion file / batch tracking**
   - Used both for logging and as orchestration metadata between ingestion and preprocessing.
   - Key columns:
@@ -105,8 +124,76 @@ To coordinate work between ingestion, preprocessing, and other functions, the sy
     - `error_message` – optional error details.
     - `created_at`, `updated_at` – UTC timestamps.
 
+- `dbo.preprocessing_events`: **planned preprocessing work tracking**
+  - Represents the “work orders” for turning raw ingestion outputs into cleaned / model-ready tables.
+  - Typically created from `preprocessing_plans` in the code and used to coordinate downstream preprocessing jobs.
+  - Key columns:
+    - `id` (`UNIQUEIDENTIFIER`, PK).
+    - `batch_id` – links preprocessing work back to the same logical batch as ingestion.
+    - `system_event_id` – FK → `system_events.id` to tie the preprocessing run to a function execution.
+    - `integration_type`, `integration_provider` – describe which logical integration this preprocessing relates to (e.g. same values used in `ingestion_events`).
+    - `container_name`, `blob_path` – where the input data for this preprocessing step lives.
+    - `target_table` – the logical/physical table that this preprocessing step will write to.
+    - `pipeline_name` – the name of the Python pipeline or function that will execute the preprocessing.
+    - `status` – lifecycle of the preprocessing job, e.g. `planned`, `running`, `completed`, `failed`.
+    - `error_message` – optional error details.
+    - `created_at`, `updated_at` – UTC timestamps.
+
 Ingestion functions insert rows into `ingestion_events` (and optionally `system_events`) when raw files are written to Blob.  
-Preprocessing functions query `ingestion_events` by `status` / `integration_type` / `integration_provider` to discover which raw files need to be processed next, providing a clean, decoupled handoff between stages.
+Preprocessing functions then:
+
+1. Create corresponding rows in `preprocessing_events` for each planned preprocessing job.
+2. Use the status fields on both `ingestion_events` and `preprocessing_events` to coordinate which batches are ready, in progress, or failed.
+
+---
+
+### Source / Target Mapping and Schema Metadata Tables
+
+Beyond tracking *events*, the system also stores **schema metadata** so that pipelines can be driven by configuration rather than hard-coded schemas:
+
+- `dbo.source_target_mappings`: **logical mapping from inputs to pipelines and targets**
+  - Maps a `(source_provider, source_type)` pair to a target table and pipeline implementation.
+  - Used by orchestration code to answer: “Given this source (e.g. `kaggle` + `historical_results`), which pipeline should run, and where should the data land?”
+  - Key columns:
+    - `id` (`INT`, identity PK).
+    - `source_provider` – e.g. `kaggle`, `rugby365`.
+    - `source_type` – e.g. `historical`, `fixtures`, `results`.
+    - `target_table` – e.g. `dbo.rugby_results_clean`.
+    - `pipeline_name` – the Python pipeline/function name to execute.
+    - `created_at` – UTC timestamp.
+
+- `dbo.schema_tables`: **catalogue of logical tables**
+  - One row per logical table in the system (source or target, or sometimes both).
+  - Designed to be flexible:
+    - Some rows may only have `integration_type` / `integration_provider` filled (for unnamed source “shapes”).
+    - Others may only have `table_name` filled (for concrete target tables).
+    - Some may use both when the same logical table acts as both source and target in different stages.
+  - Key columns:
+    - `id` (`UNIQUEIDENTIFIER`, PK).
+    - `table_name` – optional physical table name in SQL, e.g. `dbo.rugby_results_clean`.
+    - `integration_type`, `integration_provider` – optional metadata for connecting this schema to a particular integration.
+    - `description` – optional human-readable description.
+    - `is_active` – flag to mark deprecated schemas.
+    - `created_at`, `updated_at` – UTC timestamps.
+
+- `dbo.schema_columns`: **column-level schema definition**
+  - One row per column belonging to a row in `schema_tables`.
+  - Used to describe the expected structure of a table or file, and to drive validation / transformation logic.
+  - Key columns:
+    - `id` (`UNIQUEIDENTIFIER`, PK).
+    - `table_id` – FK → `schema_tables.id`.
+    - `column_name` – logical/physical column name.
+    - `data_type` – logical type description (e.g. `string`, `int`, `datetime2`, `decimal(18,2)`).
+    - `is_required` – whether this field is mandatory in the schema.
+    - `ordinal_position` – optional column order.
+    - `max_length`, `numeric_precision`, `numeric_scale` – optional extra metadata for lengths/precision.
+    - `created_at`, `updated_at` – UTC timestamps.
+
+Together, these metadata tables allow the platform to:
+
+- Discover which pipeline to run for a given integration (`source_target_mappings`).
+- Understand what the input and output schemas should look like (`schema_tables` and `schema_columns`).
+- Track the lifecycle of data as it moves from raw ingestion through preprocessing to final model-ready tables (`system_events`, `ingestion_events`, `preprocessing_events`).
 
 ## Key Vault Access
 
@@ -238,10 +325,12 @@ rugby-bot/
     ├── data_ingestion/
     │   ├── __init__.py
     │   ├── integration_helpers.py      # Helper functions for ingestion workflows
-    │   └── integration_services.py     # Kaggle + Rugby365 ingestion orchestration
+    │   └── integration_services.py     # ingestion orchestration
     ├── data_preprocessing/
     │   ├── __init__.py
-    │   └── services.py                 # Bronze → silver feature building
+    │   ├── preprocessing_helpers.py      # Helper functions for fine grained preprocessing actions
+    │   ├── preprocessing_pipelines.py    # preprocessing function selection and orchestration  
+    │   └── preprocessing_services.py     # preprocessor orchestration
     ├── logging/
     │   ├── __init__.py
     │   └── logger.py                   # get_logger() and logging helpers

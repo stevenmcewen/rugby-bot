@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+import pandas as pd
 
 from functions.sql import sql_client as sql_mod
 
@@ -429,3 +430,54 @@ def test_sql_client_connection_retries_and_raises(monkeypatch):
     # Should have attempted the connection max_attempts times (3), with two sleeps.
     assert attempts["count"] == 3
     assert sleeps == [5, 10]
+
+
+def test_write_dataframe_to_table_sets_safe_chunksize_for_sql_server(monkeypatch):
+    """
+    write_dataframe_to_table
+    - must pass a practical fixed chunksize while relying on executemany-style inserts.
+    """
+    captured: dict = {}
+
+    def fake_to_sql(self, *args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql, raising=True)
+
+    # Column count shouldn't affect chunksize in executemany mode.
+    cols = [f"c{i}" for i in range(11)]
+    df = pd.DataFrame({c: [1] * 500 for c in cols})
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = object()
+
+    client.write_dataframe_to_table(df=df, table_name="dbo.InternationalMatchResults")
+
+    kwargs = captured["kwargs"]
+    # We rely on the default SQLAlchemy/pandas insert strategy (executemany-style),
+    # with engine-level fast_executemany enabled.
+    assert "method" not in kwargs
+    assert kwargs["chunksize"] == 1000
+    assert kwargs["schema"] == "dbo"
+    assert kwargs["name"] == "InternationalMatchResults"
+    assert kwargs["index"] is False
+    assert kwargs["if_exists"] == "append"
+
+
+def test_write_dataframe_to_table_uses_dbo_when_schema_not_provided(monkeypatch):
+    captured: dict = {}
+
+    def fake_to_sql(self, *args, **kwargs):
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql, raising=True)
+
+    df = pd.DataFrame({"a": [1], "b": [2]})
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = object()
+
+    client.write_dataframe_to_table(df=df, table_name="InternationalMatchResults")
+
+    assert captured["kwargs"]["schema"] == "dbo"
+    assert captured["kwargs"]["name"] == "InternationalMatchResults"
