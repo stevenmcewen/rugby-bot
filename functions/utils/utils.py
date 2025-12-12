@@ -60,8 +60,22 @@ def matches_type(series: pd.Series, expected: str) -> bool:
         if expected_norm == "bool":
             return pd.api.types.is_bool_dtype(series)
         if expected_norm == "date":
-            # either already datetime, or a string we can reasonably parse
-            return pd.api.types.is_datetime64_any_dtype(series) or pd.api.types.is_string_dtype(series)
+            # Either already datetime, or a string/object we can reasonably parse later.
+            return (
+                pd.api.types.is_datetime64_any_dtype(series)
+                or pd.api.types.is_string_dtype(series)
+                or pd.api.types.is_object_dtype(series)
+            )
+
+        if expected_norm == "datetime":
+            # CSV-backed datetime columns typically arrive as object dtype.
+            # Treat datetime64, string, and object columns as acceptable "datetime"
+            # inputs (parsing/normalisation happens later in the pipeline).
+            return (
+                pd.api.types.is_datetime64_any_dtype(series)
+                or pd.api.types.is_string_dtype(series)
+                or pd.api.types.is_object_dtype(series)
+            )
 
         # Fail closed: unknown expected types must not validate successfully.
         logger.warning("Unknown expected type for matches_type(): %r", expected)

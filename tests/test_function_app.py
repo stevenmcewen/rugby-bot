@@ -206,3 +206,48 @@ def test_ingest_rugby365_fixtures_timer_failure(monkeypatch):
     assert any(
         "r365 fixtures ingest failed" in (c.get("details") or "") for c in fake_sql.completed_events
     )
+
+
+# Does PreprocessDataFunction call orchestrate_preprocessing and complete the system event?
+# must call orchestrate_preprocessing with the correct sql client and system event id and mark the event as succeeded
+def test_preprocess_data_timer_success(monkeypatch):
+    fake_sql = _make_module_with_fake_sql_client(monkeypatch)
+
+    calls = {}
+
+    def fake_orchestrate_preprocessing(*, sql_client, system_event_id, pipeline_name="default_preprocessing"):
+        calls["sql_client"] = sql_client
+        calls["system_event_id"] = system_event_id
+        calls["pipeline_name"] = pipeline_name
+
+    monkeypatch.setattr(function_app, "orchestrate_preprocessing", fake_orchestrate_preprocessing)
+
+    result = function_app.PreprocessDataFunction(timer=object())
+
+    assert calls["sql_client"] is fake_sql
+    assert calls["pipeline_name"] == "default_preprocessing"
+    assert any(
+        c["system_event_id"] == calls["system_event_id"] and c["status"] == "succeeded"
+        for c in fake_sql.completed_events
+    )
+    assert result is None
+
+
+# Does PreprocessDataFunction handle preprocessing failures by marking the system event as failed and re-raising?
+# must set the system event status to failed, record the error details, and re-raise the original exception
+def test_preprocess_data_timer_failure(monkeypatch):
+    fake_sql = _make_module_with_fake_sql_client(monkeypatch)
+
+    def failing_orchestrate(*_args, **_kwargs):
+        raise RuntimeError("preprocess failed")
+
+    monkeypatch.setattr(function_app, "orchestrate_preprocessing", failing_orchestrate)
+
+    with pytest.raises(RuntimeError) as exc:
+        function_app.PreprocessDataFunction(timer=object())
+
+    assert "preprocess failed" in str(exc.value)
+    assert any(c["status"] == "failed" for c in fake_sql.completed_events)
+    assert any(
+        "preprocess failed" in (c.get("details") or "") for c in fake_sql.completed_events
+    )

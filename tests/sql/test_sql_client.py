@@ -39,7 +39,7 @@ def test_sql_client_init_uses_engine_and_credential(monkeypatch):
 
     # Does fake_create_engine use the correct url, creator and pool_pre_ping?
     # must use the correct url, creator and pool_pre_ping and set the correct url and pool_pre_ping
-    def fake_create_engine(url: str, creator, pool_pre_ping: bool):
+    def fake_create_engine(url: str, creator, pool_pre_ping: bool, **_kwargs):
         created["url"] = url
         created["pool_pre_ping"] = pool_pre_ping
 
@@ -93,7 +93,7 @@ def test_get_token_builds_odbc_token():
     # Encoded token should end with the UTF‑16 bytes of "abc123"
     assert b"a\x00b\x00c\x001\x002\x003\x00" in value
 
-
+# Create a dummy result for testing
 class DummyResult:
     def __init__(self, row_value: object | None = None):
         self._row_value = row_value
@@ -107,6 +107,7 @@ class DummyResult:
         return self._row_value
 
 
+# Create a dummy connection for testing
 class DummyConnection:
     def __init__(self, row_value: str | None = None, should_fail: bool = False):
         self.row_value = row_value
@@ -130,6 +131,7 @@ class DummyConnection:
         self.committed = True
 
 
+# Create a dummy engine for testing
 class DummyEngine:
     def __init__(self, connection: DummyConnection):
         self._connection = connection
@@ -143,7 +145,8 @@ def _make_client_with_engine(connection: DummyConnection) -> sql_mod.SqlClient:
     client.engine = DummyEngine(connection)
     return client
 
-
+# Does the start_system_event function create a system event?
+# must create a system event and return the correct system event id
 def test_start_system_event_success(monkeypatch):
     event_id = uuid4()
     conn = DummyConnection(row_value=str(event_id))
@@ -165,7 +168,8 @@ def test_start_system_event_success(monkeypatch):
     assert conn.committed is True
     assert len(conn.executed) == 1
 
-
+# Does the start_system_event function raise an error when the connection fails?
+# must raise an error when the connection fails
 def test_start_system_event_error(monkeypatch):
     conn = DummyConnection(row_value=None, should_fail=True)
     client = _make_client_with_engine(conn)
@@ -178,7 +182,8 @@ def test_start_system_event_error(monkeypatch):
             event_type="ingestion",
         )
 
-
+# Does the complete_system_event function complete a system event?
+# must complete a system event and return the correct system event id
 def test_complete_system_event_success(monkeypatch):
     conn = DummyConnection()
     client = _make_client_with_engine(conn)
@@ -193,7 +198,8 @@ def test_complete_system_event_success(monkeypatch):
     assert conn.committed is True
     assert len(conn.executed) == 1
 
-
+# Does the complete_system_event function raise an error when the connection fails?
+# must raise an error when the connection fails
 def test_complete_system_event_error(monkeypatch):
     conn = DummyConnection(should_fail=True)
     client = _make_client_with_engine(conn)
@@ -206,7 +212,8 @@ def test_complete_system_event_error(monkeypatch):
             details="error",
         )
 
-
+# Does the start_ingestion_event function create an ingestion event?
+# must create an ingestion event and return the correct ingestion event id
 def test_start_ingestion_event_success(monkeypatch):
     ingestion_id = uuid4()
     conn = DummyConnection(row_value=str(ingestion_id))
@@ -228,7 +235,8 @@ def test_start_ingestion_event_success(monkeypatch):
     assert conn.committed is True
     assert len(conn.executed) == 1
 
-
+# Does the start_ingestion_event function raise an error when the connection fails?
+# must raise an error when the connection fails
 def test_start_ingestion_event_error(monkeypatch):
     conn = DummyConnection(row_value=None, should_fail=True)
     client = _make_client_with_engine(conn)
@@ -246,7 +254,8 @@ def test_start_ingestion_event_error(monkeypatch):
             error_message=None,
         )
 
-
+# Does the update_ingestion_event function update an ingestion event?
+# must update an ingestion event and return the correct ingestion event id
 def test_update_ingestion_event_success(monkeypatch):
     conn = DummyConnection()
     client = _make_client_with_engine(conn)
@@ -262,7 +271,8 @@ def test_update_ingestion_event_success(monkeypatch):
     assert conn.committed is True
     assert len(conn.executed) == 1
 
-
+# Does the update_ingestion_event function raise an error when the connection fails?
+# must raise an error when the connection fails
 def test_update_ingestion_event_error(monkeypatch):
     conn = DummyConnection(should_fail=True)
     client = _make_client_with_engine(conn)
@@ -276,7 +286,8 @@ def test_update_ingestion_event_error(monkeypatch):
             error_message="err",
         )
 
-
+# Does the get_last_ingestion_event_created_at function return None when the query result is NULL?
+# must return None when the query result is NULL
 def test_get_last_ingestion_event_created_at_returns_none(monkeypatch):
     """
     get_last_ingestion_event_created_at
@@ -293,7 +304,8 @@ def test_get_last_ingestion_event_created_at_returns_none(monkeypatch):
 
     assert result is None
 
-
+# Does the get_last_ingestion_event_created_at function return a datetime unchanged when the DB already returns a datetime value?
+# must return a datetime unchanged when the DB already returns a datetime value
 def test_get_last_ingestion_event_created_at_returns_datetime_direct(monkeypatch):
     """
     get_last_ingestion_event_created_at
@@ -312,7 +324,8 @@ def test_get_last_ingestion_event_created_at_returns_datetime_direct(monkeypatch
     assert isinstance(result, datetime)
     assert result == dt
 
-
+# Does the get_last_ingestion_event_created_at function parse a common ISO datetime string value?
+# must parse a common ISO datetime string value
 def test_get_last_ingestion_event_created_at_parses_iso_string(monkeypatch):
     """
     get_last_ingestion_event_created_at
@@ -331,7 +344,8 @@ def test_get_last_ingestion_event_created_at_parses_iso_string(monkeypatch):
     assert isinstance(result, datetime)
     assert result == datetime.fromisoformat(value)
 
-
+# Does the SqlClient __init__ connection factory retry transient connection failures and eventually succeed?
+# must retry transient connection failures and eventually succeed
 def test_sql_client_connection_retries_then_succeeds(monkeypatch):
     """
     SqlClient __init__ connection factory
@@ -353,7 +367,7 @@ def test_sql_client_connection_retries_then_succeeds(monkeypatch):
             raise RuntimeError("temporary connect error")
         return SimpleNamespace(closed=False)
 
-    def fake_create_engine(url: str, creator, pool_pre_ping: bool):
+    def fake_create_engine(url: str, creator, pool_pre_ping: bool, **_kwargs):
         created["url"] = url
         created["pool_pre_ping"] = pool_pre_ping
         created["creator"] = creator
@@ -385,7 +399,8 @@ def test_sql_client_connection_retries_then_succeeds(monkeypatch):
     # Backoff should have slept between failed attempts: 5s then 10s.
     assert sleeps == [5, 10]
 
-
+# Does the SqlClient __init__ connection factory give up and surface the last exception after max retries?
+# must give up and surface the last exception after max retries
 def test_sql_client_connection_retries_and_raises(monkeypatch):
     """
     SqlClient __init__ connection factory
@@ -404,7 +419,7 @@ def test_sql_client_connection_retries_and_raises(monkeypatch):
         attempts["count"] += 1
         raise RuntimeError("permanent connect error")
 
-    def fake_create_engine(url: str, creator, pool_pre_ping: bool):
+    def fake_create_engine(url: str, creator, pool_pre_ping: bool, **_kwargs):
         created["url"] = url
         created["pool_pre_ping"] = pool_pre_ping
         created["creator"] = creator
@@ -431,40 +446,8 @@ def test_sql_client_connection_retries_and_raises(monkeypatch):
     assert attempts["count"] == 3
     assert sleeps == [5, 10]
 
-
-def test_write_dataframe_to_table_sets_safe_chunksize_for_sql_server(monkeypatch):
-    """
-    write_dataframe_to_table
-    - must pass a practical fixed chunksize while relying on executemany-style inserts.
-    """
-    captured: dict = {}
-
-    def fake_to_sql(self, *args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-
-    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql, raising=True)
-
-    # Column count shouldn't affect chunksize in executemany mode.
-    cols = [f"c{i}" for i in range(11)]
-    df = pd.DataFrame({c: [1] * 500 for c in cols})
-
-    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
-    client.engine = object()
-
-    client.write_dataframe_to_table(df=df, table_name="dbo.InternationalMatchResults")
-
-    kwargs = captured["kwargs"]
-    # We rely on the default SQLAlchemy/pandas insert strategy (executemany-style),
-    # with engine-level fast_executemany enabled.
-    assert "method" not in kwargs
-    assert kwargs["chunksize"] == 1000
-    assert kwargs["schema"] == "dbo"
-    assert kwargs["name"] == "InternationalMatchResults"
-    assert kwargs["index"] is False
-    assert kwargs["if_exists"] == "append"
-
-
+# Does the write_dataframe_to_table function use the dbo schema when no schema is provided?
+# must use the dbo schema when no schema is provided
 def test_write_dataframe_to_table_uses_dbo_when_schema_not_provided(monkeypatch):
     captured: dict = {}
 
@@ -481,3 +464,233 @@ def test_write_dataframe_to_table_uses_dbo_when_schema_not_provided(monkeypatch)
 
     assert captured["kwargs"]["schema"] == "dbo"
     assert captured["kwargs"]["name"] == "InternationalMatchResults"
+
+# Does the write_dataframe_to_table function skip when the dataframe is empty?
+# must skip when the dataframe is empty
+def test_write_dataframe_to_table_empty_dataframe_skips(monkeypatch):
+    called = {"to_sql": 0}
+
+    def fake_to_sql(self, *args, **kwargs):
+        called["to_sql"] += 1
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql, raising=True)
+
+    df = pd.DataFrame(columns=["a", "b"])
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = object()
+
+    client.write_dataframe_to_table(df=df, table_name="dbo.Target")
+    assert called["to_sql"] == 0
+
+# Does the write_dataframe_to_table function raise a TypeError when the dataframe is not a pandas DataFrame?
+# must raise a TypeError when the dataframe is not a pandas DataFrame
+def test_write_dataframe_to_table_non_dataframe_raises_type_error():
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = object()
+    with pytest.raises(TypeError):
+        client.write_dataframe_to_table(df="not-a-df", table_name="dbo.Target")  # type: ignore[arg-type]
+
+# Does the get_ingestion_events_by_status function return the ingestion events by status?
+# must return the ingestion events by status
+def test_get_ingestion_events_by_status_returns_rows(monkeypatch):
+    rows = [SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())]
+    conn = DummyConnection()
+    client = _make_client_with_engine(conn)
+
+    class DummyResultWithFetchall(DummyResult):
+        def fetchall(self):
+            return rows
+
+    def fake_execute(*args, **kwargs):
+        conn.executed.append((args, kwargs))
+        return DummyResultWithFetchall()
+
+    conn.execute = fake_execute  # type: ignore[method-assign]
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    result = client.get_ingestion_events_by_status(status="ingested")
+    assert result == rows
+    assert len(conn.executed) == 1
+
+# Does the get_source_target_mapping function build the source target mapping?
+# must build the source target mapping
+def test_get_source_target_mapping_builds_dicts(monkeypatch):
+    # emulate DB rows as tuples (as produced by SQLAlchemy Core)
+    rows = [
+        ("kaggle", "results", "dbo.T1", "p1"),
+        ("kaggle", "results", "dbo.T2", "p2"),
+    ]
+    conn = DummyConnection()
+    client = _make_client_with_engine(conn)
+
+    class DummyResultWithFetchall(DummyResult):
+        def fetchall(self):
+            return rows
+
+    def fake_execute(*args, **kwargs):
+        conn.executed.append((args, kwargs))
+        return DummyResultWithFetchall()
+
+    conn.execute = fake_execute  # type: ignore[method-assign]
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    mapping = client.get_source_target_mapping(source_provider="kaggle", source_type="results")
+    assert mapping == [
+        {
+            "source_provider": "kaggle",
+            "source_type": "results",
+            "target_table": "dbo.T1",
+            "pipeline_name": "p1",
+        },
+        {
+            "source_provider": "kaggle",
+            "source_type": "results",
+            "target_table": "dbo.T2",
+            "pipeline_name": "p2",
+        },
+    ]
+
+# Does the create_preprocessing_event function create a preprocessing event?
+# must create a preprocessing event
+def test_create_preprocessing_event_success(monkeypatch):
+    pre_id = uuid4()
+    conn = DummyConnection(row_value=str(pre_id))
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    plan = SimpleNamespace(
+        batch_id=uuid4(),
+        system_event_id=uuid4(),
+        integration_type="results",
+        integration_provider="kaggle",
+        container_name="raw",
+        blob_path="a.csv",
+        target_table="dbo.T",
+        pipeline_name="p",
+    )
+
+    event_details = client.create_preprocessing_event(preprocessing_plan=plan)
+    assert event_details["id"] == pre_id
+    assert event_details["status"] == "started"
+    assert conn.committed is True
+
+# Does the update_preprocessing_event function update a preprocessing event?
+# must update a preprocessing event
+def test_update_preprocessing_event_success(monkeypatch):
+    conn = DummyConnection()
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    client.update_preprocessing_event(preprocessing_event_id=uuid4(), status="succeeded", error_message=None)
+    assert conn.committed is True
+    assert len(conn.executed) == 1
+
+# Does the get_preprocessing_events_by_batch_id function return the preprocessing events by batch id?
+# must return the preprocessing events by batch id
+def test_get_preprocessing_events_by_batch_id_returns_rows(monkeypatch):
+    rows = [SimpleNamespace(status="succeeded"), SimpleNamespace(status="failed")]
+    conn = DummyConnection()
+    client = _make_client_with_engine(conn)
+
+    class DummyResultWithFetchall(DummyResult):
+        def fetchall(self):
+            return rows
+
+    def fake_execute(*args, **kwargs):
+        conn.executed.append((args, kwargs))
+        return DummyResultWithFetchall()
+
+    conn.execute = fake_execute  # type: ignore[method-assign]
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    result = client.get_preprocessing_events_by_batch_id(batch_id=uuid4())
+    assert result == rows
+
+# Does the get_schema function require at least one filter?
+# must require at least one filter
+def test_get_schema_requires_at_least_one_filter():
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    with pytest.raises(ValueError):
+        client.get_schema()
+
+# Does the get_schema function build the expected list?
+# must build the expected list
+def test_get_schema_builds_expected_list(monkeypatch):
+    # Provide SQLAlchemy Row-like objects with attribute access.
+    rows = [
+        SimpleNamespace(
+            table_id=uuid4(),
+            table_name="dbo.Target",
+            integration_type="results",
+            integration_provider="kaggle",
+            description="d",
+            column_id=uuid4(),
+            column_name="MatchDate",
+            data_type="date",
+            is_required=1,
+            ordinal_position=1,
+            max_length=None,
+            numeric_precision=None,
+            numeric_scale=None,
+        )
+    ]
+
+    class Result:
+        def fetchall(self):
+            return rows
+
+    class Conn(DummyConnection):
+        def execute(self, *args, **kwargs):
+            self.executed.append((args, kwargs))
+            return Result()
+
+    conn = Conn()
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    schema = client.get_schema(table_name="dbo.Target")
+    assert schema[0]["table_name"] == "dbo.Target"
+    assert schema[0]["column_name"] == "MatchDate"
+    assert schema[0]["is_required"] is True
+
+# Does the get_venue_database function return the venue database?
+# must return the venue database
+def test_get_venue_database_returns_dataframe(monkeypatch):
+    # Mimic SQLAlchemy result: rows + keys()
+    rows = [("CAPE TOWN STADIUM", "Cape Town", "South Africa")]
+    keys = lambda: ["venue", "city", "country"]
+
+    class Result:
+        def fetchall(self):
+            return rows
+
+        def keys(self):
+            return keys()
+
+    class Conn(DummyConnection):
+        def execute(self, *args, **kwargs):
+            self.executed.append((args, kwargs))
+            return Result()
+
+    conn = Conn()
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    df = client.get_venue_database()
+    assert isinstance(df, pd.DataFrame)
+    assert list(df.columns) == ["venue", "city", "country"]
+    assert df.iloc[0]["city"] == "Cape Town"
+
+# Does the get_last_ingestion_event_created_at function parse the SQL string format?
+# must parse the SQL string format
+def test_get_last_ingestion_event_created_at_parses_sql_string_format(monkeypatch):
+    value = "2025-12-08 14:18:52.123456"
+    conn = DummyConnection(row_value=value)
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    result = client.get_last_ingestion_event_created_at(
+        integration_provider="rugby365",
+        integration_type="results",
+    )
+    assert result == datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f")

@@ -71,29 +71,13 @@ Instead, it uses a small data access layer (`SqlClient` in `functions/sql/sql_cl
 
 - **Centralises how we talk to the database** so every function (ingestion, preprocessing, modelling, notifications) uses the same, tested path to SQL.
 - **Uses managed identity under the hood** so credentials are never checked into source control or stored in configuration – they live only in Entra ID.
-- **Records high-level “system events” and “ingestion events”** in SQL whenever functions run or batches are processed, giving us an audit trail of:
+- **Records high-level “system events” and detailed pipeline events** in SQL whenever functions run or batches are processed, giving us an audit trail of:
   - which function ran,
-  - which data batches were ingested,
+  - which data batches were ingested / preprocessed,
   - and whether they succeeded, are in progress, or failed.
 - **Supports orchestration-by-metadata**: downstream jobs (e.g. preprocessing) discover what to work on by querying these event tables, rather than by being tightly coupled to the ingestion code.
 
 The goal is to treat the database not just as storage, but also as the “control plane” for long‑running ingestion pipelines: transparent, queryable, and easy to debug.
-
-### Data Access and Event Tracking Philosophy
-
-At runtime, the Functions code never talks directly to Azure SQL with ad-hoc connection strings.  
-Instead, it uses a small data access layer (`SqlClient` in `functions/sql/sql_client.py`) that:
-
-- **Centralises how we talk to the database** so every function (ingestion, preprocessing, modelling, notifications) uses the same, tested path to SQL.
-- **Uses managed identity under the hood** so credentials are never checked into source control or stored in configuration – they live only in Entra ID.
-- **Records high-level “system events” and detailed pipeline events** in SQL whenever functions run or batches are processed, giving us an audit trail of:
-  - which function ran,
-  - which data batches were ingested or preprocessed,
-  - which logical tables and schemas are in play,
-  - and whether they succeeded, are in progress, or failed.
-- **Supports orchestration-by-metadata**: downstream jobs (e.g. preprocessing, feature building) discover what to work on by querying these event and metadata tables, rather than by being tightly coupled to the ingestion or modelling code.
-
-The goal is to treat the database not just as storage, but also as the **control plane** for long-running ingestion pipelines: transparent, queryable, and easy to debug.
 
 ---
 
@@ -135,7 +119,7 @@ To coordinate work between ingestion, preprocessing, and other functions, the sy
     - `container_name`, `blob_path` – where the input data for this preprocessing step lives.
     - `target_table` – the logical/physical table that this preprocessing step will write to.
     - `pipeline_name` – the name of the Python pipeline or function that will execute the preprocessing.
-    - `status` – lifecycle of the preprocessing job, e.g. `planned`, `running`, `completed`, `failed`.
+    - `status` – lifecycle of the preprocessing job, e.g. `started`, `running`, `succeeded`, `failed`.
     - `error_message` – optional error details.
     - `created_at`, `updated_at` – UTC timestamps.
 
@@ -151,9 +135,9 @@ Preprocessing functions then:
 
 Beyond tracking *events*, the system also stores **schema metadata** so that pipelines can be driven by configuration rather than hard-coded schemas:
 
-- `dbo.source_target_mappings`: **logical mapping from inputs to pipelines and targets**
+- `dbo.preprocessing_source_target_mappings`: **logical mapping from sources to preprocessing pipelines and targets**
   - Maps a `(source_provider, source_type)` pair to a target table and pipeline implementation.
-  - Used by orchestration code to answer: “Given this source (e.g. `kaggle` + `historical_results`), which pipeline should run, and where should the data land?”
+  - Used by preprocessing orchestration to answer: “Given this ingested source (e.g. `kaggle` + `historical_results`), which preprocessing pipeline should run, and where should the data land?”
   - Key columns:
     - `id` (`INT`, identity PK).
     - `source_provider` – e.g. `kaggle`, `rugby365`.
@@ -183,7 +167,9 @@ Beyond tracking *events*, the system also stores **schema metadata** so that pip
     - `id` (`UNIQUEIDENTIFIER`, PK).
     - `table_id` – FK → `schema_tables.id`.
     - `column_name` – logical/physical column name.
-    - `data_type` – logical type description (e.g. `string`, `int`, `datetime2`, `decimal(18,2)`).
+    - `data_type` – logical type description used by the runtime validator (`matches_type` in `functions/utils/utils.py`).
+      - Currently supported logical types: `string`, `int`, `bool`, `date`, `datetime`.
+      - Note: CSV inputs commonly arrive as `object` dtype; for `date`/`datetime` we accept object/string dtypes and parse/normalise later in preprocessing.
     - `is_required` – whether this field is mandatory in the schema.
     - `ordinal_position` – optional column order.
     - `max_length`, `numeric_precision`, `numeric_scale` – optional extra metadata for lengths/precision.
@@ -191,7 +177,7 @@ Beyond tracking *events*, the system also stores **schema metadata** so that pip
 
 Together, these metadata tables allow the platform to:
 
-- Discover which pipeline to run for a given integration (`source_target_mappings`).
+- Discover which preprocessing pipeline to run for a given source (`preprocessing_source_target_mappings`).
 - Understand what the input and output schemas should look like (`schema_tables` and `schema_columns`).
 - Track the lifecycle of data as it moves from raw ingestion through preprocessing to final model-ready tables (`system_events`, `ingestion_events`, `preprocessing_events`).
 
