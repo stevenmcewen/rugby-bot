@@ -168,8 +168,19 @@ def transform_rugby365_fixtures_data_to_international_fixtures(source_data: pd.D
         logger.error("Error transforming Rugby365 fixtures data to international fixtures for preprocessing event %s: %s", preprocessing_event.id, e)
         raise
 
-### Validation functions ###
+## Model ready data functions ###
+def transform_international_results_to_model_ready_data(source_data: pd.DataFrame, preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> pd.DataFrame:
+    """
+    Transform the international results data to model ready data.
+    """
+    try:
+        # transform the data from the source schema to the target schema
+        return source_data
+    except Exception as e:
+        logger.error("Error transforming international results data to model ready data for preprocessing event %s: %s", preprocessing_event.id, e)
+        raise
 
+### Validation functions ###
 def validate_transformed_data(transformed_data: pd.DataFrame, target_schema: dict) -> None:
     """
     Validate the transformed data against the target schema.
@@ -248,15 +259,45 @@ def get_source_data(preprocessing_event: "PreprocessingEvent", sql_client: SqlCl
     Get the source data for a preprocessing event.
     """
     try:
-        blob_client = BlobClient.from_connection_string(
+        # Stage 2 support: when a source_table is provided, read from SQL instead of blob.
+        # This enables "preprocessed table -> model table" pipelines.
+        source_table = getattr(preprocessing_event, "source_table", None)
+        if source_table:
+            # Optional filtering: if the source table contains batch/system_event ids, filter to this event.
+            schema_rows = sql_client.get_schema(table_name=source_table)
+            colnames = [c.get("column_name") for c in schema_rows if c.get("column_name")]
+            lower_to_actual = {c.lower(): c for c in colnames}
+
+            where_parts: list[str] = []
+            params: dict[str, object] = {}
+
+            batch_col = lower_to_actual.get("batch_id")
+            if batch_col:
+                where_parts.append(f"{batch_col} = :batch_id")
+                params["batch_id"] = str(preprocessing_event.batch_id)
+
+            sys_col = lower_to_actual.get("system_event_id")
+            if sys_col:
+                where_parts.append(f"{sys_col} = :system_event_id")
+                params["system_event_id"] = str(preprocessing_event.system_event_id)
+
+            where_sql = " AND ".join(where_parts) if where_parts else None
+            dataframe = sql_client.read_table_to_dataframe(
+                table_name=source_table,
+                where_sql=where_sql,
+                params=params or None,
+            )
+        else:
+            # Default behaviour (stage 1): read the ingested blob.
+            blob_client = BlobClient.from_connection_string(
                 conn_str=settings.storage_connection,
                 container_name=preprocessing_event.container_name,
                 blob_name=preprocessing_event.blob_path,
             )
-        data_stream = blob_client.download_blob()
-        raw_bytes = data_stream.readall()
-        data_frame = pd.read_csv(BytesIO(raw_bytes))
-        return data_frame
+            data_stream = blob_client.download_blob()
+            raw_bytes = data_stream.readall()
+            dataframe = pd.read_csv(BytesIO(raw_bytes))
+        return dataframe
     except Exception as e:
         logger.error("Error getting source data for preprocessing event %s: %s", preprocessing_event.id, e)
         raise
@@ -266,11 +307,17 @@ def get_source_schema(preprocessing_event: "PreprocessingEvent", sql_client: Sql
     Get the expected source schema for a preprocessing event.
     """
     try:
-        # get the logical source schema
-        schema = sql_client.get_schema(
-            integration_provider=preprocessing_event.integration_provider,
-            integration_type=preprocessing_event.integration_type,
-        )
+        # If a source_table is provided, use its schema directly (stage 2 SQL->SQL pipelines).
+        # Otherwise, fall back to integration_provider/type lookups (stage 1 blob->SQL pipelines).
+        source_table = getattr(preprocessing_event, "source_table", None)
+        if source_table:
+            schema = sql_client.get_schema(table_name=source_table)
+        else:
+            # get the logical source schema
+            schema = sql_client.get_schema(
+                integration_provider=preprocessing_event.integration_provider,
+                integration_type=preprocessing_event.integration_type,
+            )
         # convert the schema to a richer dictionary keyed by column name
         schema_dict = {
             "columns": [col["column_name"] for col in schema],
@@ -321,6 +368,16 @@ def write_data_to_target_table(
             preprocessing_event.id,
             e,
         )
+        raise
+
+def truncate_target_table(preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> None:
+    """
+    Truncate the target table for a preprocessing event.
+    """
+    try:
+        sql_client.truncate_table(table_name=preprocessing_event.target_table)
+    except Exception as e:
+        logger.error("Error truncating target table for preprocessing event %s: %s", preprocessing_event.id, e)
         raise
 
 ### Transform helpers ###

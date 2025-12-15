@@ -10,11 +10,6 @@ from functions.data_ingestion.integration_services import (
 )
 from functions.data_preprocessing.preprocessing_services import orchestrate_preprocessing
 from functions.logging.logger import get_logger
-from functions.ml_models.services import score_upcoming_matches, train_models
-from functions.notifications.services import (
-    generate_weekend_predictions,
-    send_prediction_email,
-)
 
 app = func.FunctionApp()
 

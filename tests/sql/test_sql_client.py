@@ -517,8 +517,8 @@ def test_get_ingestion_events_by_status_returns_rows(monkeypatch):
 def test_get_source_target_mapping_builds_dicts(monkeypatch):
     # emulate DB rows as tuples (as produced by SQLAlchemy Core)
     rows = [
-        ("kaggle", "results", "dbo.T1", "p1"),
-        ("kaggle", "results", "dbo.T2", "p2"),
+        ("kaggle", "results", "dbo.T1", "p1", 1, None),
+        ("kaggle", "results", "dbo.T2", "p2", 2, "dbo.T1"),
     ]
     conn = DummyConnection()
     client = _make_client_with_engine(conn)
@@ -541,12 +541,16 @@ def test_get_source_target_mapping_builds_dicts(monkeypatch):
             "source_type": "results",
             "target_table": "dbo.T1",
             "pipeline_name": "p1",
+            "execution_order": 1,
+            "source_table": None,
         },
         {
             "source_provider": "kaggle",
             "source_type": "results",
             "target_table": "dbo.T2",
             "pipeline_name": "p2",
+            "execution_order": 2,
+            "source_table": "dbo.T1",
         },
     ]
 
@@ -565,14 +569,114 @@ def test_create_preprocessing_event_success(monkeypatch):
         integration_provider="kaggle",
         container_name="raw",
         blob_path="a.csv",
+        source_table=None,
         target_table="dbo.T",
         pipeline_name="p",
+        execution_order=1,
     )
 
     event_details = client.create_preprocessing_event(preprocessing_plan=plan)
     assert event_details["id"] == pre_id
+    assert event_details["batch_id"] == plan.batch_id
+    assert event_details["system_event_id"] == plan.system_event_id
+    assert event_details["integration_type"] == plan.integration_type
+    assert event_details["integration_provider"] == plan.integration_provider
+    assert event_details["container_name"] == plan.container_name
+    assert event_details["blob_path"] == plan.blob_path
+    assert event_details["source_table"] == plan.source_table
+    assert event_details["target_table"] == plan.target_table
+    assert event_details["pipeline_name"] == plan.pipeline_name
+    assert event_details["execution_order"] == plan.execution_order
     assert event_details["status"] == "started"
     assert conn.committed is True
+
+
+def test_read_table_to_dataframe_requires_table_name():
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = DummyEngine(DummyConnection())
+    with pytest.raises(ValueError):
+        client.read_table_to_dataframe(table_name="")
+
+
+def test_read_table_to_dataframe_builds_query_and_returns_dataframe(monkeypatch):
+    rows = [(1, 2), (3, 4)]
+
+    class Result:
+        def fetchall(self):
+            return rows
+
+        def keys(self):
+            return ["a", "b"]
+
+    class Conn(DummyConnection):
+        def execute(self, *args, **kwargs):
+            self.executed.append((args, kwargs))
+            return Result()
+
+    conn = Conn()
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    df = client.read_table_to_dataframe(table_name="MyTable")
+
+    assert isinstance(df, pd.DataFrame)
+    assert list(df.columns) == ["a", "b"]
+    assert df.to_dict(orient="records") == [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
+
+    # Ensure the expected SQL was executed (default dbo schema).
+    executed_sql = conn.executed[0][0][0]
+    assert executed_sql == "SELECT * FROM dbo.MyTable"
+
+
+def test_read_table_to_dataframe_supports_schema_columns_where_and_params(monkeypatch):
+    rows = [(10, 20)]
+
+    class Result:
+        def fetchall(self):
+            return rows
+
+        def keys(self):
+            return ["x", "y"]
+
+    class Conn(DummyConnection):
+        def execute(self, *args, **kwargs):
+            self.executed.append((args, kwargs))
+            return Result()
+
+    conn = Conn()
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    df = client.read_table_to_dataframe(
+        table_name="silver.Facts",
+        columns=["x", "y"],
+        where_sql="x = :x",
+        params={"x": 10},
+    )
+
+    assert df.to_dict(orient="records") == [{"x": 10, "y": 20}]
+    executed_sql, kwargs = conn.executed[0][0][0], conn.executed[0][1]
+    assert executed_sql == "SELECT x, y FROM silver.Facts WHERE x = :x"
+    assert kwargs["params"] == {"x": 10}
+
+
+def test_truncate_table_requires_table_name():
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = DummyEngine(DummyConnection())
+    with pytest.raises(ValueError):
+        client.truncate_table(table_name="")
+
+
+def test_truncate_table_builds_query_and_commits(monkeypatch):
+    conn = DummyConnection()
+    client = _make_client_with_engine(conn)
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    client.truncate_table(table_name="MyTable")
+
+    assert conn.committed is True
+    executed_sql = conn.executed[0][0][0]
+    assert executed_sql == "TRUNCATE TABLE dbo.MyTable"
 
 # Does the update_preprocessing_event function update a preprocessing event?
 # must update a preprocessing event
@@ -605,6 +709,10 @@ def test_get_preprocessing_events_by_batch_id_returns_rows(monkeypatch):
 
     result = client.get_preprocessing_events_by_batch_id(batch_id=uuid4())
     assert result == rows
+    # Ensure the query includes new stage-2 columns so consumers can access them safely.
+    executed_sql = conn.executed[0][0][0]
+    assert "source_table" in executed_sql
+    assert "execution_order" in executed_sql
 
 # Does the get_schema function require at least one filter?
 # must require at least one filter

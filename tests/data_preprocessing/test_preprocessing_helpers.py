@@ -18,6 +18,9 @@ class DummyPreprocessingEvent:
         integration_provider: str = "kaggle",
         integration_type: str = "historical_results",
         target_table: str = "dbo.InternationalMatchResults",
+        source_table: str | None = None,
+        batch_id=None,
+        system_event_id=None,
     ):
         self.id = uuid4()
         self.container_name = container_name
@@ -25,6 +28,10 @@ class DummyPreprocessingEvent:
         self.integration_provider = integration_provider
         self.integration_type = integration_type
         self.target_table = target_table
+        self.source_table = source_table
+        # Only needed for stage-2 SQL reads when the source table supports filtering.
+        self.batch_id = batch_id or uuid4()
+        self.system_event_id = system_event_id or uuid4()
 
 # Does the validate_source_data function raise a ValueError if the source data is empty?
 def test_validate_source_data_empty_raises():
@@ -89,6 +96,22 @@ def test_get_target_schema_builds_expected_dict():
     assert schema["data_types"]["c"] == "date"
     assert schema["required"]["c"] is True
 
+
+def test_get_source_schema_uses_source_table_when_provided():
+    event = DummyPreprocessingEvent(source_table="dbo.Source")
+
+    class FakeSqlClient:
+        def get_schema(self, **kwargs):
+            assert kwargs["table_name"] == "dbo.Source"
+            return [
+                {"column_name": "x", "data_type": "int", "is_required": 1},
+            ]
+
+    schema = helpers.get_source_schema(event, FakeSqlClient())
+    assert schema["columns"] == ["x"]
+    assert schema["data_types"]["x"] == "int"
+    assert schema["required"]["x"] is True
+
 # Does the get_source_data function download the blob and read the csv?
 def test_get_source_data_downloads_blob_and_reads_csv(monkeypatch):
     event = DummyPreprocessingEvent(container_name="raw", blob_path="x.csv")
@@ -125,6 +148,38 @@ def test_get_source_data_downloads_blob_and_reads_csv(monkeypatch):
     assert list(df.columns) == ["col1", "col2"]
     assert df.shape == (2, 2)
 
+
+def test_get_source_data_reads_from_sql_when_source_table_provided():
+    batch_id = uuid4()
+    system_event_id = uuid4()
+    event = DummyPreprocessingEvent(
+        source_table="dbo.Source",
+        batch_id=batch_id,
+        system_event_id=system_event_id,
+    )
+
+    expected_df = pd.DataFrame([{"a": 1}])
+
+    class FakeSqlClient:
+        def get_schema(self, **kwargs):
+            assert kwargs["table_name"] == "dbo.Source"
+            # Provide filters so helper will build WHERE + params
+            return [
+                {"column_name": "batch_id", "data_type": "uniqueidentifier", "is_required": 0},
+                {"column_name": "system_event_id", "data_type": "uniqueidentifier", "is_required": 0},
+                {"column_name": "a", "data_type": "int", "is_required": 0},
+            ]
+
+        def read_table_to_dataframe(self, *, table_name, where_sql=None, params=None, columns=None):
+            assert table_name == "dbo.Source"
+            assert columns is None
+            assert where_sql == "batch_id = :batch_id AND system_event_id = :system_event_id"
+            assert params == {"batch_id": str(batch_id), "system_event_id": str(system_event_id)}
+            return expected_df
+
+    out = helpers.get_source_data(event, sql_client=FakeSqlClient())
+    assert out.equals(expected_df)
+
 # Does the write_data_to_target_table function delegate to the sql client?
 def test_write_data_to_target_table_delegates_to_sql_client():
     event = DummyPreprocessingEvent(target_table="dbo.Target")
@@ -143,6 +198,21 @@ def test_write_data_to_target_table_delegates_to_sql_client():
     helpers.write_data_to_target_table(df, event, sql)
     assert sql.called_with["df"].equals(df)
     assert sql.called_with["table_name"] == "dbo.Target"
+
+
+def test_truncate_target_table_delegates_to_sql_client():
+    event = DummyPreprocessingEvent(target_table="dbo.Target")
+
+    class FakeSqlClient:
+        def __init__(self):
+            self.called_with = None
+
+        def truncate_table(self, *, table_name: str):
+            self.called_with = table_name
+
+    sql = FakeSqlClient()
+    helpers.truncate_target_table(event, sql)
+    assert sql.called_with == "dbo.Target"
 
 # Does the add_kickoff_datetime_from_date_and_time function combine the date and time correctly?
 def test_add_kickoff_datetime_from_date_and_time_combines_correctly():
@@ -372,5 +442,39 @@ def test_transform_rugby365_fixtures_data_to_international_fixtures_builds_kicko
     assert len(out) == 1
     assert pd.to_datetime(out.loc[0, "KickoffTimeLocal"]) == pd.Timestamp("2025-12-08 04:05:00")
     assert bool(out.loc[0, "WorldCup"]) is True
+
+
+def test_transform_international_results_to_model_ready_data_passthrough():
+    """
+    Stage-2 transform currently behaves as a pass-through.
+    This test locks in the contract that it returns a DataFrame with the
+    same data (until feature engineering is implemented).
+    """
+    event = DummyPreprocessingEvent(
+        integration_provider="kaggle",
+        integration_type="historical_results",
+        source_table="dbo.InternationalMatchResults",
+        target_table="dbo.InternationalMatchResultsModelData",
+    )
+    source = pd.DataFrame(
+        [
+            {
+                "MatchDate": "2025-12-08",
+                "HomeTeam": "FRANCE",
+                "AwayTeam": "WALES",
+                "HomeScore": 10,
+                "AwayScore": 7,
+            }
+        ]
+    )
+
+    out = helpers.transform_international_results_to_model_ready_data(
+        source,
+        event,
+        sql_client=SimpleNamespace(),
+    )
+
+    assert isinstance(out, pd.DataFrame)
+    assert out.equals(source)
 
 
