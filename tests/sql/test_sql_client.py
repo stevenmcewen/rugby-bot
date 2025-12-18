@@ -657,7 +657,9 @@ def test_read_table_to_dataframe_supports_schema_columns_where_and_params(monkey
     assert df.to_dict(orient="records") == [{"x": 10, "y": 20}]
     executed_sql, kwargs = conn.executed[0][0][0], conn.executed[0][1]
     assert executed_sql == "SELECT x, y FROM silver.Facts WHERE x = :x"
-    assert kwargs["params"] == {"x": 10}
+    # SQLAlchemy Connection.execute receives bound params as the second positional arg.
+    executed_args = conn.executed[0][0]
+    assert executed_args[1] == {"x": 10}
 
 
 def test_truncate_table_requires_table_name():

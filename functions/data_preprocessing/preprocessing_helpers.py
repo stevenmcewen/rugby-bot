@@ -3,11 +3,12 @@ from typing import TYPE_CHECKING
 from azure.storage.blob import BlobClient
 from io import BytesIO
 import pandas as pd
+import numpy as np
 
 from functions.config.settings import get_settings
 from functions.logging.logger import get_logger
 from functions.sql.sql_client import SqlClient
-from functions.utils.utils import matches_type, drop_na_rows
+from functions.utils.utils import matches_type, drop_na_rows, time_decay_weight, roll_mean, roll_sum
 
 if TYPE_CHECKING:
     from functions.data_preprocessing.preprocessing_services import PreprocessingEvent
@@ -168,17 +169,87 @@ def transform_rugby365_fixtures_data_to_international_fixtures(source_data: pd.D
         logger.error("Error transforming Rugby365 fixtures data to international fixtures for preprocessing event %s: %s", preprocessing_event.id, e)
         raise
 
-## Model ready data functions ###
-def transform_international_results_to_model_ready_data(source_data: pd.DataFrame, preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> pd.DataFrame:
+## Model ready transformation functions ###
+def transform_international_results_to_model_ready_data(
+    source_data: pd.DataFrame,
+    preprocessing_event: "PreprocessingEvent",    
+    sql_client: SqlClient,
+) -> pd.DataFrame:
     """
-    Transform the international results data to model ready data.
+    Transform the international results data to model-ready data.
     """
     try:
-        # transform the data from the source schema to the target schema
-        return source_data
+        results_df = source_data.copy()
+        if results_df.empty:
+            logger.warning("No international results rows for preprocessing_event=%s", preprocessing_event.id)
+            return pd.DataFrame()
+
+        # Drop audit columns
+        audit_cols = ["CreatedAt"]
+        results_df = results_df.drop(columns=[c for c in audit_cols if c in results_df.columns], errors="ignore")
+
+        # Filter to canonical teams/venues
+        results_df = team_name_standardization(
+            results_df, sql_client,
+            table_name="dbo.InternationalRugbyTeams",
+            home_team_col="HomeTeam", away_team_col="AwayTeam",
+        )
+        results_df = venue_standardisation(
+            results_df, sql_client,
+            table_name="dbo.RugbyVenues",
+            venue_col="Venue",
+        )
+
+        # Add static international team features (Tier, Hemisphere, etc.)
+        results_df = add_international_features(results_df, sql_client)
+
+        # Long format staging
+        team_long = to_team_match_long_format(
+            results_df,
+            id_col="ID",
+            date_col="MatchDate",
+            home_team_col="HomeTeam",
+            away_team_col="AwayTeam",
+            home_score_col="HomeScore",
+            away_score_col="AwayScore",
+            extra_context_cols=("CompetitionName", "Venue", "City", "Country", "Neutral", "WorldCup"),
+        )
+
+        # Rolling team form
+        team_form_long = compute_rolling_team_form(team_long, form_window=10)
+
+        # Attach features back to matches (correct arg order)
+        model_base_df = attach_rolling_team_form_to_matches(results_df, team_form_long)
+
+        # Targets (drop null scores first)
+        model_base_df = model_base_df.dropna(subset=["HomeScore", "AwayScore"])
+        # compute the time decay weight
+        model_base_df["TimeDecayWeight"] = time_decay_weight(
+            model_base_df,
+            date_col="MatchDate",
+            half_life_years=10.0,
+        )
+        # add the match targets
+        model_base_df = add_match_targets(
+            model_base_df,
+            home_score_col="HomeScore",
+            away_score_col="AwayScore",
+            drop_draws=True,
+        )
+
+        # Don’t let the model see scores
+        model_base_df = model_base_df.drop(columns=["HomeScore", "AwayScore"])
+        # make sure columns are correct data types
+        model_base_df["MatchDate"] = pd.to_datetime(
+            model_base_df["MatchDate"],
+            errors="coerce"
+        ).dt.normalize()
+        return model_base_df
+
     except Exception as e:
-        logger.error("Error transforming international results data to model ready data for preprocessing event %s: %s", preprocessing_event.id, e)
+        logger.error("Error transforming international results to model ready data: %s", e)
         raise
+
 
 ### Validation functions ###
 def validate_transformed_data(transformed_data: pd.DataFrame, target_schema: dict) -> None:
@@ -515,5 +586,401 @@ def determine_world_cup_match(
     except Exception as e:
         logger.error("Error determining world cup match: %s", e)
         raise
+
+
+#### model ready data helpers ###
+def team_name_standardization(
+    df: pd.DataFrame,
+    sql_client: SqlClient,
+    table_name: str = "dbo.InternationalRugbyTeams",
+    home_team_col: str = "HomeTeam",
+    away_team_col: str = "AwayTeam",
+) -> pd.DataFrame:
+    """
+    Current logic: Drop matches where either HomeTeam or AwayTeam is not present
+    in the canonical teams table.
+
+    Future logic: Apply alias mapping / standardisation before filtering.
+
+    Accepts:
+    - df: pd.DataFrame - the dataframe to standardize the team names for
+    - sql_client: SqlClient - the sql client to use to get the canonical teams table
+    - table_name: str - the name of the table to get the canonical teams table from
+    - home_team_col: str - the name of the column to use for the home team
+    - away_team_col: str - the name of the column to use for the away team
+
+    Returns:
+    - pd.DataFrame - the dataframe with the team names standardized
+    """
+    try:
+        df = df.copy()
+        # drop rows where the home or away team is null
+        df = df.dropna(subset=[home_team_col, away_team_col])
+        # get the canonical teams table from the sql client
+        teams_df = sql_client.read_table_to_dataframe(table_name=table_name, columns=["TeamName"])
+        if teams_df.empty or "TeamName" not in teams_df.columns:
+            raise ValueError(f"Canonical teams table {table_name} is empty or missing TeamName column")
+
+        valid_teams = set(
+            teams_df["TeamName"].astype(str).str.upper().str.strip()
+        )
+
+        # Normalise just for comparison (not changing stored values)
+        home = df[home_team_col].astype(str).str.upper().str.strip()
+        away = df[away_team_col].astype(str).str.upper().str.strip()
+        # filter the dataframe to only include matches where the home and away team names are in the canonical teams table
+        mask_valid = home.isin(valid_teams) & away.isin(valid_teams)
+
+        # Log what got dropped (before filtering)
+        dropped_home = set(home[~home.isin(valid_teams)])
+        dropped_away = set(away[~away.isin(valid_teams)])
+        dropped_team_names = sorted(dropped_home | dropped_away)
+
+        if dropped_team_names:
+            logger.warning("Dropping matches with unknown teams: %s", dropped_team_names)
+
+        filtered_df = df.loc[mask_valid].reset_index(drop=True)
+        return filtered_df
+
+    except Exception as e:
+        logger.error("Error filtering/standardising team names: %s", e)
+        raise
+
+def venue_standardisation(
+    df: pd.DataFrame,
+    sql_client: SqlClient,
+    table_name: str,
+    venue_col: str = "Venue",
+) -> pd.DataFrame:
+    """
+    Current logic:
+      - Drop matches where Venue is not present in the canonical venues table.
+
+    Future logic:
+      - Apply alias mapping before filtering.
+    """
+    try:
+        df = df.copy()
+        # drop rows where the venue is null
+        df = df.dropna(subset=[venue_col])
+        # Load canonical venues
+        venues_df = sql_client.read_table_to_dataframe(table_name=table_name,columns=["VenueName"])
+
+        if venues_df.empty or "VenueName" not in venues_df.columns:
+            raise ValueError(
+                f"Canonical venues table {table_name} is empty or missing VenueName column"
+            )
+
+        valid_venues = set(
+            venues_df["VenueName"]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+        )
+
+        # Normalise for comparison only
+        venue_norm = (
+            df[venue_col]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+        )
+
+        mask_valid = venue_norm.isin(valid_venues)
+
+        # Log dropped venues (before filtering)
+        dropped_venues = sorted(set(venue_norm[~mask_valid]))
+
+        if dropped_venues:
+            logger.warning(
+                "Dropping %s matches due to unknown venues: %s",
+                len(dropped_venues),
+                dropped_venues,
+            )
+
+        filtered_df = df.loc[mask_valid].reset_index(drop=True)
+        return filtered_df
+
+    except Exception as e:
+        logger.error("Error filtering venues: %s", e)
+        raise
+
+def add_match_targets(
+    df: pd.DataFrame,
+    home_score_col: str = "HomeScore",
+    away_score_col: str = "AwayScore",
+    drop_draws: bool = True,
+) -> pd.DataFrame:
+    """
+    Add target columns derived from final match scores.
+
+    Targets:
+      - HomeWin: binary (1 = home win, 0 = home loss)
+      - PointDiff: HomeScore - AwayScore
+
+    Accepts:
+    - df: pd.DataFrame - the dataframe to add the match targets to
+    - home_score_col: str - the name of the column to use for the home score
+    - away_score_col: str - the name of the column to use for the away score
+    - drop_draws: bool - whether to drop draws for binary classification
+
+    Returns:
+    - pd.DataFrame - the dataframe with the match targets added
+    """
+    try:
+        df = df.copy()
+        # Point differential
+        df["PointDiff"] = df[home_score_col] - df[away_score_col]
+        # Binary outcome
+        df["HomeWin"] = (df["PointDiff"] > 0).astype(int)
+        # Optional: remove draws for binary classification
+        if drop_draws:
+            df = df[df["PointDiff"] != 0].reset_index(drop=True)
+
+        return df
+    except Exception as e:
+        logger.error("Error adding match targets: %s", e)
+        raise
+
+def to_team_match_long_format(
+    matches: pd.DataFrame,
+    id_col: str = "ID",
+    date_col: str = "MatchDate",
+    home_team_col: str = "HomeTeam",
+    away_team_col: str = "AwayTeam",
+    home_score_col: str = "HomeScore",
+    away_score_col: str = "AwayScore",
+    extra_context_cols: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    """
+    Convert wide match rows into long team-match rows (2 rows per match):
+      - one from the HomeTeam perspective
+      - one from the AwayTeam perspective
+
+    Output columns are designed for rolling form calculations.
+
+    Accepts:
+    - matches: pd.DataFrame - the dataframe to convert to a long format
+    - id_col: str - the name of the column to use for the id
+    - date_col: str - the name of the column to use for the date
+    - home_team_col: str - the name of the column to use for the home team
+    - away_team_col: str - the name of the column to use for the away team
+    - home_score_col: str - the name of the column to use for the home score
+    - away_score_col: str - the name of the column to use for the away score
+    - extra_context_cols: tuple[str, ...] - the name of the columns to use for the extra context
+
+    Returns:
+    - pd.DataFrame - the dataframe with the matches converted to a long format
+    """
+    
+    try:
+        df = matches.copy()
+        # Keep only context columns that actually exist (so this function is resilient)
+        context_cols = [c for c in extra_context_cols if c in df.columns]
+        # Home perspective
+        home_long = df[[id_col, date_col, home_team_col, away_team_col, home_score_col, away_score_col, *context_cols]].copy()
+        home_long.rename(columns={
+            home_team_col: "Team",
+            away_team_col: "Opponent",
+            home_score_col: "PointsFor",
+            away_score_col: "PointsAgainst",
+        }, inplace=True)
+        home_long["IsHome"] = 1
+
+        # Away perspective
+        away_long = df[[id_col, date_col, home_team_col, away_team_col, home_score_col, away_score_col, *context_cols]].copy()
+        away_long.rename(columns={
+            away_team_col: "Team",
+            home_team_col: "Opponent",
+            away_score_col: "PointsFor",
+            home_score_col: "PointsAgainst",
+        }, inplace=True)
+        away_long["IsHome"] = 0
+
+        # join the home and away long dataframes
+        long_df = pd.concat([home_long, away_long], ignore_index=True)
+
+        # Outcome comptations from the team perspective
+        long_df["PointDiff"] = long_df["PointsFor"] - long_df["PointsAgainst"]
+        long_df["Win"] = (long_df["PointDiff"] > 0).astype(int)
+        long_df["Draw"] = (long_df["PointDiff"] == 0).astype(int)
+        long_df["Loss"] = (long_df["PointDiff"] < 0).astype(int)
+
+        # Sort for stable rolling calculations
+        long_df[date_col] = pd.to_datetime(long_df[date_col], errors="coerce")
+        # sort the dataframe by team, date, and id
+        long_df = long_df.sort_values(["Team", date_col, id_col]).reset_index(drop=True)
+
+        return long_df
+    except Exception as e:
+        logger.error("Error converting matches to team match long format: %s", e)
+        raise
+
+def compute_rolling_team_form(
+    team_long: pd.DataFrame,
+    form_window: int = 10,
+    date_col: str = "MatchDate",
+) -> pd.DataFrame:
+    """
+    Compute rolling team-form features per team using only prior matches.
+    Accepts:
+    - team_long: pd.DataFrame - the dataframe to compute the rolling team form for
+    - form_window: int - the window size for the rolling team form
+    - date_col: str - the name of the column to use for the date
+
+    Returns:
+    - pd.DataFrame - the dataframe with the rolling team form computed
+    """
+    try:
+        df = team_long.copy()
+
+        # Ensure correct ordering
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        df = df.sort_values(["Team", date_col, "ID"]).reset_index(drop=True)
+
+        # Compute per-team rolling features (transform keeps index aligned)
+        df["FormWinRate"] = (
+            df.groupby("Team")["Win"]
+              .transform(lambda s: roll_mean(s, form_window))
+        )
+        df["FormDrawRate"] = (
+            df.groupby("Team")["Draw"]
+              .transform(lambda s: roll_mean(s, form_window))
+        )
+        df["FormPointsFor"] = (
+            df.groupby("Team")["PointsFor"]
+              .transform(lambda s: roll_mean(s, form_window))
+        )
+        df["FormPointsAgainst"] = (
+            df.groupby("Team")["PointsAgainst"]
+              .transform(lambda s: roll_mean(s, form_window))
+        )
+        df["FormPointDiff"] = (
+            df.groupby("Team")["PointDiff"]
+              .transform(lambda s: roll_mean(s, form_window))
+        )
+
+        # form_games = rolling count of prior matches in the window
+        outcome_count = df["Win"] + df["Draw"] + df["Loss"]
+        df["FormGames"] = (
+            outcome_count.groupby(df["Team"])
+                         .transform(lambda s: roll_sum(s, form_window))
+        )
+        # Rolling ops + shift introduce NaNs, which forces float dtype; cast back to nullable int.
+        # Values should be whole numbers (counts), so rounding is safe.
+        df["FormGames"] = df["FormGames"].round(0).astype("Int64")
+
+        form_complete_df = df
+        return form_complete_df
+
+    except Exception as e:
+        logger.error("Error computing rolling team form: %s", e)
+        raise
+
+def attach_rolling_team_form_to_matches(
+    results_df: pd.DataFrame,
+    team_form_long: pd.DataFrame,
+    id_col: str = "ID",
+    home_team_col: str = "HomeTeam",
+    away_team_col: str = "AwayTeam",
+) -> pd.DataFrame:
+    """
+    Attach pre-match rolling form features to each match row:
+      - Home_* features (from the home team perspective)
+      - Away_* features (from the away team perspective)
+      - Diff_* features (Home - Away)
+    """
+    df = results_df.copy()
+
+    rolling_cols = [
+        "FormWinRate",
+        "FormDrawRate",
+        "FormPointsFor",
+        "FormPointsAgainst",
+        "FormPointDiff",
+        "FormGames",
+    ]
+
+    # Home perspective rows (IsHome=1)
+    home_feats = (
+        team_form_long[team_form_long["IsHome"] == 1][[id_col, "Team", *rolling_cols]]
+        .copy()
+        .rename(columns={c: f"Home_{c}" for c in rolling_cols})
+    )
+
+    # Away perspective rows (IsHome=0)
+    away_feats = (
+        team_form_long[team_form_long["IsHome"] == 0][[id_col, "Team", *rolling_cols]]
+        .copy()
+        .rename(columns={c: f"Away_{c}" for c in rolling_cols})
+    )
+
+    # Join on match id + team name to avoid mismatches
+    df = df.merge(home_feats, left_on=[id_col, home_team_col], right_on=[id_col, "Team"], how="left").drop(columns=["Team"])
+    df = df.merge(away_feats, left_on=[id_col, away_team_col], right_on=[id_col, "Team"], how="left").drop(columns=["Team"])
+
+    # Diff features (Home - Away) using the actual column names that exist
+    df["Diff_FormWinRate"] = df["Home_FormWinRate"] - df["Away_FormWinRate"]
+    df["Diff_FormPointDiff"] = df["Home_FormPointDiff"] - df["Away_FormPointDiff"]
+    df["Diff_FormPointsFor"] = df["Home_FormPointsFor"] - df["Away_FormPointsFor"]
+    df["Diff_FormPointsAgainst"] = df["Home_FormPointsAgainst"] - df["Away_FormPointsAgainst"]
+
+    return df
+
+def add_international_features(
+    df: pd.DataFrame,
+    sql_client: SqlClient,
+) -> pd.DataFrame:
+    """
+    Add international team-level features (e.g. Tier, Hemisphere) for
+    HomeTeam and AwayTeam.
+
+    This is designed to be:
+      - case/whitespace insensitive
+      - non-destructive (nullable features; no row drops)
+      - expects dbo.InternationalRugbyTeams to contain TeamName, Tier, Hemisphere
+    """
+    try:
+        df = df.copy()
+
+        teams = sql_client.read_table_to_dataframe(
+            table_name="dbo.InternationalRugbyTeams",
+            columns=["TeamName", "Tier", "Hemisphere"],
+        )
+
+        if teams.empty or "TeamName" not in teams.columns:
+            logger.warning("add_international_features: dbo.InternationalRugbyTeams returned no rows; skipping.")
+            return df
+
+        teams = teams.copy()
+        teams["_team_key"] = teams["TeamName"].astype(str).str.upper().str.strip()
+        teams = teams.dropna(subset=["_team_key"]).drop_duplicates(subset=["_team_key"])
+
+        # Build lookups
+        tier_lookup = pd.to_numeric(teams.get("Tier"), errors="coerce")
+        tier_lookup = pd.Series(tier_lookup.values, index=teams["_team_key"])
+
+        hemisphere_lookup = None
+        if "Hemisphere" in teams.columns:
+            hemisphere_series = teams["Hemisphere"].astype(str).str.upper().str.strip()
+            hemisphere_lookup = pd.Series(hemisphere_series.values, index=teams["_team_key"])
+
+        home_key = df["HomeTeam"].astype(str).str.upper().str.strip()
+        away_key = df["AwayTeam"].astype(str).str.upper().str.strip()
+
+        df["Home_Tier"] = home_key.map(tier_lookup).astype("Int64")
+        df["Away_Tier"] = away_key.map(tier_lookup).astype("Int64")
+        df["Diff_Tier"] = (df["Home_Tier"] - df["Away_Tier"]).astype("Int64")
+
+        if hemisphere_lookup is not None:
+            df["Home_Hemisphere"] = home_key.map(hemisphere_lookup)
+            df["Away_Hemisphere"] = away_key.map(hemisphere_lookup)
+
+        return df
+    except Exception as e:
+        logger.error("Error adding international features: %s", e)
+        raise
+
+
 
 

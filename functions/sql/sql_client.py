@@ -839,7 +839,9 @@ class SqlClient:
         # execute the query and return the result
         try:
             with self.engine.connect() as conn:
-                result = conn.execute(sa.text(query), params=params or {})
+                # SQLAlchemy Connection.execute takes bound parameters as the *second positional*
+                # argument (it does not accept a `params=` keyword argument).
+                result = conn.execute(sa.text(query), params or {})
                 rows = result.fetchall()
                 return pd.DataFrame(rows, columns=result.keys())
         except Exception as e:
