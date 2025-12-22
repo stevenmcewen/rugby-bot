@@ -814,3 +814,170 @@ class SqlClient:
         except Exception as e:
             logger.error("Error loading venue database from dbo.RugbyVenues: %s", e)
             raise
+
+    ## model helpers ###
+    def get_model_specs_by_model_group_key(self, model_group_key: str) -> dict:
+        """
+        Get the full model specification bundle for a given model_group_key.
+
+        Returns a dict containing:
+        - group: shared config (dataset sources, enabled flag)
+        - models: list of models in the group (each with trainer + target)
+        - columns: columns by role (entity/feature/target + optional weight)
+        """
+        try:
+            with self.engine.connect() as conn:
+                # 1) Model group
+                group_result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            ModelGroupKey,
+                            TrainingDatasetSource,
+                            ScoringDatasetSource,
+                            IsEnabled
+                        FROM dbo.ModelGroup
+                        WHERE ModelGroupKey = :model_group_key;
+                        """
+                    ),
+                    {"model_group_key": model_group_key},
+                )
+                group_row = group_result.fetchone()
+                if group_row is None:
+                    raise ValueError(f"No ModelGroup found for model_group_key={model_group_key!r}")
+
+                group_spec = {
+                    "model_group_key": group_row[0],
+                    "training_dataset_source": group_row[1],
+                    "scoring_dataset_source": group_row[2],
+                    "is_enabled": bool(group_row[3]),
+                }
+
+                if not group_spec["is_enabled"]:
+                    raise ValueError(f"ModelGroup {model_group_key!r} is disabled")
+
+                # 2) Models in group
+                models_result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            ModelKey,
+                            TrainerKey,
+                            TargetColumn,
+                            PredictionType,
+                            IsEnabled,
+                            SampleWeightColumn,
+                            TimeColumn
+                        FROM dbo.ModelRegistry
+                        WHERE ModelGroupKey = :model_group_key
+                        ORDER BY ModelKey;
+                        """
+                    ),
+                    {"model_group_key": model_group_key},
+                )
+                model_rows = models_result.fetchall()
+                if not model_rows:
+                    raise ValueError(f"No models registered in ModelRegistry for model_group_key={model_group_key!r}")
+
+                models = []
+                for row in model_rows:
+                    models.append(
+                        {
+                            "model_key": row[0],
+                            "trainer_key": row[1],
+                            "target_column": row[2],
+                            "prediction_type": row[3],
+                            "is_enabled": bool(row[4]),
+                            "sample_weight_column": row[5],
+                            "time_column": row[6],
+                        }
+                    )
+
+                enabled_models = [m for m in models if m["is_enabled"]]
+                if not enabled_models:
+                    raise ValueError(f"All models in group {model_group_key!r} are disabled")
+
+                # 3) Columns by role
+                cols_result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            ColumnName,
+                            ColumnRole,
+                            IsActive,
+                            OrdinalPosition
+                        FROM dbo.ModelColumn
+                        WHERE ModelGroupKey = :model_group_key
+                        ORDER BY
+                            CASE ColumnRole
+                                WHEN 'entity' THEN 1
+                                WHEN 'feature' THEN 2
+                                WHEN 'weight' THEN 3
+                                WHEN 'target' THEN 4
+                                ELSE 99
+                            END,
+                            OrdinalPosition;
+                        """
+                    ),
+                    {"model_group_key": model_group_key},
+                )
+                col_rows = cols_result.fetchall()
+
+                columns = {
+                    "entity": [],
+                    "feature": [],
+                    "target": [],
+                    "weight": None,   # single column name if present
+                }
+
+                for row in col_rows:
+                    column_name = row[0]
+                    column_role = row[1]
+                    is_active = bool(row[2])
+
+                    if not is_active:
+                        continue
+
+                    if column_role in ("entity", "feature", "target"):
+                        columns[column_role].append(column_name)
+                    elif column_role == "weight":
+                        # allow at most one weight column
+                        if columns["weight"] is not None and columns["weight"] != column_name:
+                            raise ValueError(
+                                f"Multiple active weight columns found for {model_group_key!r}: "
+                                f"{columns['weight']!r} and {column_name!r}"
+                            )
+                        columns["weight"] = column_name
+
+                if not columns["feature"]:
+                    raise ValueError(f"No active feature columns found for model_group_key={model_group_key!r}")
+
+                spec_bundle = {
+                    **group_spec,
+                    "models": enabled_models,
+                    "columns": columns,
+                }
+                return spec_bundle
+
+        except Exception as e:
+            logger.error("Error getting model specs for model_group_key='%s': %s", model_group_key, e)
+            raise
+
+    def get_model_source_data(
+        self,
+        source_table: str,
+        columns_to_select: list[str],
+    ) -> pd.DataFrame:
+        """
+        Get the source data for a given model.
+        Return the source data as a pandas DataFrame.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(sa.text(f"SELECT {', '.join(columns_to_select)} FROM {source_table}"))
+                rows = result.fetchall()
+                df = pd.DataFrame(rows, columns=columns_to_select)
+                return df
+        except Exception as e:
+            logger.error("Error getting model source data for source_table='%s' and columns_to_select='%s': %s", source_table, columns_to_select, e)
+            raise

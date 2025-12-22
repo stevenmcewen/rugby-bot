@@ -10,7 +10,7 @@ from functions.data_ingestion.integration_services import (
 )
 from functions.data_preprocessing.preprocessing_services import orchestrate_preprocessing
 from functions.logging.logger import get_logger
-from functions.ml_models.services import score_upcoming_matches, train_models
+from functions.ml_models.ml_orchestrator import orchestrate_model_training, orchestrate_model_scoring
 from functions.notifications.services import (
     generate_weekend_predictions,
     send_prediction_email,
@@ -188,6 +188,80 @@ def PreprocessDataFunction(timer: func.TimerRequest) -> None:
         )
     except Exception as exc: 
         logger.exception("PreprocessDataFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
+
+@app.schedule(
+    schedule="0 0 8 * * 1", # 08:00 UTC every Monday
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def TrainInternationalRugbyFixturesModelFunction(timer: func.TimerRequest) -> None:
+    """
+    Train the international rugby fixtures model.
+    """
+    logger.info("TrainInternationalRugbyFixturesModelFunction triggered.")
+    system_event = sql_client.start_system_event(
+        function_name="TrainInternationalRugbyFixturesModelFunction",
+        trigger_type="timer",
+        event_type="model_training",
+    )
+
+    try:
+        orchestrate_model_training(
+            sql_client=sql_client, 
+            system_event_id=system_event.id,
+            pipeline_name="default_model_training",
+            model_group_key="international_rugby_fixtures",
+        )
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc: 
+        logger.exception("TrainInternationalRugbyFixturesModelFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
+
+@app.schedule(
+    schedule="0 0 6 * * *", # 06:00 UTC daily
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def ScoreUpcomingInternationalRugbyFixturesFunction(timer: func.TimerRequest) -> None:
+    """
+    Score the upcoming international rugby fixtures.
+    """
+    logger.info("ScoreUpcomingInternationalRugbyFixturesFunction triggered.")
+    system_event = sql_client.start_system_event(
+        function_name="ScoreUpcomingInternationalRugbyFixturesFunction",
+        trigger_type="timer",
+        event_type="model_scoring",
+    )
+
+    try:
+        orchestrate_model_scoring(
+            sql_client=sql_client, 
+            system_event_id=system_event.id,
+            pipeline_name="default_model_scoring",
+            model_group_key="international_rugby_fixtures",
+        )
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc: 
+        logger.exception("ScoreUpcomingInternationalRugbyFixturesFunction failed.")
         sql_client.complete_system_event(
             system_event_id=system_event.id,
             status="failed",
