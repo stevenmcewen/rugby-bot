@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import pandas as pd
+import hashlib
 
 from functions.logging.logger import get_logger
 
@@ -103,3 +104,36 @@ def drop_na_rows(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     except Exception as e:
         logger.error("Error dropping NA rows: %s", e)
         raise
+
+
+def stable_schema_hash(columns: list[str]) -> str:
+    """
+    Generate a stable hash of a list of columns (order-insensitive).
+    Accepts:
+    - A list of columns
+    Returns:
+    - A string representing the stable hash of the list of columns
+    Raises:
+    - ValueError if the columns list is empty
+    """
+    if not columns:
+        raise ValueError("columns list cannot be empty")
+    try:
+        normalized = "|".join(sorted(columns))
+        hash_value = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        return hash_value
+    except Exception as e:
+        logger.error("Error generating stable schema hash: %s", e)
+        raise 
+
+
+def uct_now_iso() -> str:
+    """
+    Get the current UTC time in ISO 8601 format.
+    Returns:
+    - A string representing the current UTC time in ISO 8601 format
+    """
+    south_africa = datetime.now(timezone.utc)
+    iso_time = south_africa.isoformat()
+
+    return iso_time

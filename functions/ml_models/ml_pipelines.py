@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, Callable, Sequence, Any
-from uuid import UUID
+import pandas as pd
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence
 
 from functions.config.settings import get_settings
 from functions.logging.logger import get_logger
 from functions.sql.sql_client import SqlClient
-from functions.data_preprocessing.preprocessing_pipelines import run_preprocessing_pipeline
+from functions.utils.utils import stable_schema_hash, uct_now_iso
+
+from functions.ml_models.helpers.ml_training_helpers import train_model, evaluate_model
+from functions.ml_models.helpers.ml_utils import serialize_model_artifact, persist_model_artifact
+from functions.ml_models.helpers.ml_scoring_helpers import score_model
+
 
 
 logger = get_logger(__name__)
@@ -50,6 +55,61 @@ class ModelPipeline:
             context = step(context)
         return context
 
+# data classes for the training and scoring payloads
+@dataclass
+class TrainPayload:
+    model_key: str
+    trainer_key: str
+    prediction_type: str
+
+    entity_columns: List[str]
+    feature_columns: List[str]
+    target_column: str
+
+    sample_weight_column: Optional[str]
+    time_column: Optional[str]
+
+    X: pd.DataFrame
+    y: pd.Series
+    sample_weight: Optional[pd.Series]
+    time: Optional[pd.Series]
+    model_parameters: Dict[str, Any]
+    trainer_parameters: Dict[str, Any]
+
+
+@dataclass
+class TrainedModelResult:
+    """
+    Output contract from training.
+    Keep it consistent so Evaluate + Persist steps are boring.
+    """
+    model_key: str
+    trainer_key: str
+    prediction_type: str
+
+    target_column: str
+    feature_columns: List[str]
+    entity_columns: List[str]
+    schema_hash: str
+    trained_at_utc: str
+
+    model_object: Any
+    train_rows: int
+
+
+@dataclass
+class EvaluationResult:
+    model_key: str
+    metrics: Dict[str, float]
+    evaluated_at_utc: str
+
+
+@dataclass
+class PersistedArtifact:
+    model_key: str
+    artifact_id: str
+    artifact_version: str
+    persisted_at_utc: str
 
 ### Step implementations: Shared pipelines ###
 
@@ -73,111 +133,452 @@ class LoadModelSpecStep:
     
 class LoadDataStep:
     """
-    This step loads the training data for the given model_group_key. And adds it to the context.
+    Load training or scoring data for the given model_group_key, based on model spec.
     """
-    
+
     def __call__(self, context: ModelContext) -> ModelContext:
-        logger.info("Loading training data for model_group_key: %s", context["model_group_key"])
+        logger.info("Loading data for model_group_key: %s", context["model_group_key"])
+
         try:
-            # get the sql client and the model specifications
             sql_client: SqlClient = context["sql_client"]
-            specs: dict = context["model_specs"]
+            model_specs: dict = context["model_specs"]
             run_type: str = context["run_type"]
+
             if run_type == "training":
-                dataset_source = specs["training_dataset_source"]
+                dataset_source = model_specs["training_dataset_source"]
             elif run_type == "scoring":
-                dataset_source = specs["scoring_dataset_source"]
+                dataset_source = model_specs["scoring_dataset_source"]
             else:
-                raise ValueError(f"Invalid run type: {run_type}")
-            feature_columns: list[str] = specs["columns"]["feature"]
-            target_column: str = specs["columns"]["target"]
-            sample_weight_column: str = specs["columns"]["weight"]
-            time_column: str = specs["columns"]["time"]
-            # create a list of the columns to select
-            columns_to_select: list[str] = feature_columns + [target_column] + [sample_weight_column] + [time_column]
-            # get the data from the database
+                raise ValueError(f"Invalid run type: {run_type!r}")
+
+            entity_cols: list[str] = model_specs["columns"].get("entity", []) or []
+            feature_cols: list[str] = model_specs["columns"].get("feature", []) or []
+
+            models: list[dict] = model_specs.get("models", []) or []
+
+            # Targets should be selected ONLY for training
+            target_cols: list[str] = []
+            if run_type == "training":
+                target_cols = [m["target_column"] for m in models if m.get("target_column")]
+
+            # Weight column: prefer group-level, allow per-model overrides
+            weight_cols: list[str] = []
+            group_weight = model_specs["columns"].get("weight")
+            if group_weight:
+                weight_cols.append(group_weight)
+
+            # If there is a per-model sample_weight_column, include those too (rare but allowed)
+            weight_cols.extend([model["sample_weight_column"] for model in models if model.get("sample_weight_column")])
+
+            # Time columns: useful for splits/validation; usually present in both training + scoring views
+            time_cols: list[str] = [model["time_column"] for model in models if model.get("time_column")]
+
+            # Deduplicate while preserving order
+            columns_to_select: list[str] = list(
+                dict.fromkeys(entity_cols + feature_cols + target_cols + weight_cols + time_cols)
+            )
+
             data = sql_client.get_model_source_data(
                 source_table=dataset_source,
-                columns_to_select=columns_to_select)
-            # add the data to the context
+                columns_to_select=columns_to_select,
+            )
+
             context["data"] = data
-            logger.info("Data loaded successfully for model_group_key: %s", context["model_group_key"])
+            context["columns_selected"] = columns_to_select
+            logger.info("Data loaded successfully from %s", dataset_source)
 
         except Exception as e:
-            logger.error("Error loading data for model_group_key: %s", e)
+            logger.error("Error loading data for model_group_key='%s': %s", context.get("model_group_key"), e)
             raise
         return context
 
 ### Step implementations: Training pipelines ###
 class StartTrainingRunStep:
     """
-    This step starts the training run. And adds it to the context.
+    Mark context as a training run.
     """
     def __call__(self, context: ModelContext) -> ModelContext:
         logger.info("Starting training run")
         context["status"] = "started"
         context["run_type"] = "training"
         return context
+    
+class PrepareTrainingContextStep:
+    """
+    Prepare training context:
+      - validates presence of model_spec + data
+      - validates the target columns exist in the data
+      - validates the feature columns exist in the data
+      - resolves the shared columns
+      - resolves the weight column fallback from group-level spec
+      - pre-computes the schema hash
+    """
 
-class TrainModelStep:
-    """
-    This step trains the model. And adds it to the context.
-    """
     def __call__(self, context: ModelContext) -> ModelContext:
-        logger.info("Training model")
-        context["status"] = "training"
-        # insert logic to call the training helpers here
+        logger.info("Preparing training context")
+        context["status"] = "preparing_training"
+
+        data: pd.DataFrame = context.get("data")
+        spec: dict = context.get("model_specs")
+
+        # validate the data is a pandas DataFrame and it exists
+        if data is None or not isinstance(data, pd.DataFrame):
+            raise ValueError("PrepareTrainingContextStep expected context['data'] as a pandas DataFrame")
+
+        if not spec or not isinstance(spec, dict):
+            raise ValueError("PrepareTrainingContextStep expected context['model_specs'] as a dict spec bundle")
+
+        columns = spec.get("columns") or {}
+        feature_columns: List[str] = columns.get("feature", []) or []
+        entity_columns: List[str] = columns.get("entity", []) or []
+        group_weight_column: Optional[str] = columns.get("weight")
+
+        # get list of models
+        models: List[dict] = spec.get("models", []) or []
+        # validate the target columns exist in the data
+        targets = [m.get("target_column") for m in models if m.get("target_column")]
+        # validate that the target columns exist in the data
+        missing_targets = [t for t in targets if t not in data.columns]
+        if missing_targets:
+            raise ValueError(f"Missing target columns in training data: {missing_targets}")
+
+        # validate the feature columns exist in the data
+        if not feature_columns:
+            raise ValueError("No feature columns found in model_specs['columns']['feature']")
+
+        # validate that the feature columns exist in the data
+        missing_features = [column for column in feature_columns if column not in data.columns]
+        if missing_features:
+            raise ValueError(f"Missing feature columns in data: {missing_features}")
+
+        # resolve the shared columns
+        context["resolved_feature_columns"] = feature_columns
+        context["resolved_entity_columns"] = entity_columns
+        context["resolved_group_weight_column"] = group_weight_column
+        # pre-compute the schema hash which is used to validate the features used in the model training 
+        # This is used to validate that identical features are used in the model training and scoring
+        context["resolved_schema_hash"] = stable_schema_hash(feature_columns)
+
+        # Optional: keep X once for all models (saves time/memory)
+        context["X_shared"] = data[feature_columns].copy()
+
         return context
 
-class EvaluateModelStep:
+class BuildTrainingPayloadsStep:
     """
-    This step evaluates the model. And adds it to the context.
+    Build TrainPayload objects for each enabled model.
+    Stores: context['train_payloads'] = {model_key: TrainPayload}
     """
+
     def __call__(self, context: ModelContext) -> ModelContext:
-        logger.info("Evaluating model")
-        context["status"] = "evaluating"
-        # insert logic to call the evaluation helpers here
+        logger.info("Building training payloads")
+        context["status"] = "building_train_payloads"
+
+        # get the data and the model specs from the context
+        data: pd.DataFrame = context["data"]
+        spec: dict = context["model_specs"]
+
+        feature_columns: List[str] = context["resolved_feature_columns"]
+        entity_columns: List[str] = context["resolved_entity_columns"]
+        group_weight_column: Optional[str] = context.get("resolved_group_weight_column")
+
+        # get the list of models from the model specs
+        models: List[dict] = spec.get("models", []) or []
+        if not models:
+            raise ValueError("No enabled models found in model_specs['models']")
+
+        # get the shared features from the context
+        X_shared: pd.DataFrame = context.get("X_shared")
+        # if the shared features are not in the context, create them
+        if X_shared is None:
+            X_shared = data[feature_columns].copy()
+
+        # create a dictionary to store the train payloads
+        train_payloads: Dict[str, TrainPayload] = {}
+
+        # iterate over each model and build the train payloads for each model
+        for m in models:
+            model_key = m["model_key"]
+            trainer_key = m["trainer_key"]
+            target_column = m["target_column"]
+            prediction_type = m["prediction_type"]
+            model_parameters = m.get("model_parameters") or {}
+            trainer_parameters = m.get("trainer_parameters") or {}
+
+            # Weight/time: per-model override > group-level weight role
+            sample_weight_column = m.get("sample_weight_column") or group_weight_column
+            time_column = m.get("time_column")
+
+            # Validate target exists (training only)
+            if target_column not in data.columns:
+                raise ValueError(f"Missing target column {target_column!r} for model_key={model_key!r}")
+
+            y = data[target_column].copy()
+
+            # initialize the sample weight to None
+            sample_weight = None
+            # if the sample weight column is in the data, get the sample weight
+            if sample_weight_column:
+                if sample_weight_column not in data.columns:
+                    raise ValueError(
+                        f"Missing weight column {sample_weight_column!r} for model_key={model_key!r}"
+                    )
+                else:
+                    sample_weight = data[sample_weight_column].copy()
+
+            # initialize the time values to None
+            time_values = None
+            # if the time column is in the data, get the time values
+            if time_column:
+                if time_column not in data.columns:
+                    logger.warning(
+                        "Time column %s not found for model_key=%s; time-based split may be skipped",
+                        time_column, model_key
+                    )
+                else:
+                    time_values = data[time_column].copy()
+
+            # create the train payload for the model
+            train_payloads[model_key] = TrainPayload(
+                model_key=model_key,
+                trainer_key=trainer_key,
+                prediction_type=prediction_type,
+                entity_columns=entity_columns,
+                feature_columns=feature_columns,
+                target_column=target_column,
+                sample_weight_column=sample_weight_column,
+                time_column=time_column,
+                X=X_shared,
+                y=y,
+                sample_weight=sample_weight,
+                time=time_values,
+                model_parameters=model_parameters,
+                trainer_parameters=trainer_parameters,
+            )
+
+            # log the train payload for the model
+            logger.info(
+                "Prepared TrainPayload model_key=%s trainer_key=%s target=%s type=%s",
+                model_key, trainer_key, target_column, prediction_type
+            )
+
+        context["train_payloads"] = train_payloads
         return context
+
+class TrainModelsStep:
+    """
+    Train each model from payloads.
+    Stores: context['trained_models'] = {model_key: TrainedModelResult}
+    """
+
+    def __call__(self, context: ModelContext) -> ModelContext:
+        logger.info("Training models")
+        context["status"] = "training_models"
+        sql_client: SqlClient = context["sql_client"]
+
+        # get the schema hash and the train payloads from the context
+        schema_hash: str = context["resolved_schema_hash"]
+        train_payloads: Dict[str, TrainPayload] = context.get("train_payloads") or {}
+        # validate that the train payloads exist
+        if not train_payloads:
+            raise ValueError("No train_payloads found in context. Run BuildTrainingPayloadsStep first.")
+
+        # create a dictionary to store the trained models
+        trained_models: Dict[str, TrainedModelResult] = {}
+
+        # iterate over each train payload and train the model
+        for model_key, payload in train_payloads.items():
+            # log the model key and the trainer key
+            logger.info("Training model_key=%s with trainer_key=%s", model_key, payload.trainer_key)
+
+            try:
+                # train the model
+                model_obj = train_model(payload)
+                # create the trained model result
+                trained_models[model_key] = TrainedModelResult(
+                    model_key=payload.model_key,
+                    trainer_key=payload.trainer_key,
+                    prediction_type=payload.prediction_type,
+                    target_column=payload.target_column,
+                    feature_columns=payload.feature_columns,
+                    entity_columns=payload.entity_columns,
+                    schema_hash=schema_hash,
+                    trained_at_utc=uct_now_iso(),
+                    model_object=model_obj,
+                    train_rows=int(payload.X.shape[0]),
+                )
+            except Exception as e:
+                logger.error("Error training model_key=%s: %s", model_key, e)
+                raise
+
+        # add the trained models to the context
+        context["trained_models"] = trained_models
+        context["status"] = "trained"
+        return context
+
+class EvaluateModelsStep:
+    """
+    Evaluate each trained model.
+    Stores: context['evaluation_results'] = {model_key: EvaluationResult}
+    """
+
+    def __call__(self, context: ModelContext) -> ModelContext:
+        logger.info("Evaluating models")
+        context["status"] = "evaluating_models"
+
+        # get the trained models and the train payloads from the context
+        trained_models: Dict[str, TrainedModelResult] = context.get("trained_models") or {}
+        if not trained_models:
+            raise ValueError("No trained_models found in context. Run TrainModelsStep first.")
+
+        train_payloads: Dict[str, TrainPayload] = context.get("train_payloads") or {}
+        if not train_payloads:
+            raise ValueError("No train_payloads found in context. Run BuildTrainingPayloadsStep first.")
+
+        evaluation_results: Dict[str, EvaluationResult] = {}
+
+        # iterate over each trained model and evaluate the model
+        for model_key, tm in trained_models.items():
+            logger.info("Evaluating model_key=%s", model_key)
+
+            payload = train_payloads.get(model_key)
+            if payload is None:
+                raise ValueError(f"Missing TrainPayload for model_key={model_key!r}")
+
+            try:
+                # evaluate the model
+                metrics = evaluate_model(
+                    model_object=tm.model_object,
+                    prediction_type=tm.prediction_type,
+                    X=payload.X,
+                    y=payload.y,
+                        sample_weight=payload.sample_weight,
+                        time=payload.time,
+                    )
+            except Exception as e:
+                logger.error("Error evaluating model_key=%s: %s", model_key, e)
+                raise
+
+            # create the evaluation result
+            evaluation_results[model_key] = EvaluationResult(
+                model_key=model_key,
+                metrics=metrics,
+                evaluated_at_utc=uct_now_iso(),
+            )
+
+        # add the evaluation results to the context
+        context["evaluation_results"] = evaluation_results
+        context["status"] = "evaluated"
+        return context
+
 
 class PersistModelArtifactsStep:
     """
-    This step persists the model artifacts. And adds it to the context.
+    Persist each trained model artifact + its evaluation metrics.
+    Stores: context['persisted_artifacts'] = {model_key: PersistedArtifact}
     """
+
     def __call__(self, context: ModelContext) -> ModelContext:
         logger.info("Persisting model artifacts")
-        context["status"] = "persisting"
-        # insert logic to call the persistence helpers here
-        return context
+        context["status"] = "persisting_artifacts"
 
-class FinalizeTrainingRunStep:
-    """
-    This step finalizes the training run. And adds it to the context.
-    """
-    def __call__(self, context: ModelContext) -> ModelContext:
-        logger.info("Finalizing training run")
-        context["status"] = "completed"
-        # insert logic to call the finalization helpers here
-        return context
+        sql_client: "SqlClient" = context["sql_client"]
+        system_event_id = context["system_event_id"]
 
+        trained_models: Dict[str, TrainedModelResult] = context.get("trained_models") or {}
+        eval_results: Dict[str, EvaluationResult] = context.get("evaluation_results") or {}
+
+        if not trained_models:
+            raise ValueError("No trained_models found in context. Run TrainModelsStep first.")
+
+        persisted: Dict[str, PersistedArtifact] = {}
+
+        for model_key, tm in trained_models.items():
+            metrics = eval_results.get(model_key).metrics if model_key in eval_results else {}
+
+            artifact_bytes = serialize_model_artifact(tm.model_object)
+
+            persisted_artifact = persist_model_artifact(
+                sql_client=sql_client,
+                system_event_id=system_event_id,
+                model_key=tm.model_key,
+                trainer_key=tm.trainer_key,
+                prediction_type=tm.prediction_type,
+                target_column=tm.target_column,
+                schema_hash=tm.schema_hash,
+                metrics=metrics,
+                artifact_bytes=artifact_bytes,
+            )
+
+            persisted[model_key] = persisted_artifact
+            logger.info(
+                "Persisted model_key=%s artifact_id=%s version=%s",
+                model_key, persisted_artifact.artifact_id, persisted_artifact.artifact_version
+            )
+
+        context["persisted_artifacts"] = persisted
+        context["status"] = "persisted"
+        return context
 
 ### Step implementations: Scoring pipelines ###
+
 class StartScoringRunStep:
     """
     This step starts the training run. And adds it to the context.
     """
     def __call__(self, context: ModelContext) -> ModelContext:
-        logger.info("Starting training run")
+        logger.info("Starting scoring run")
         context["status"] = "started"
         context["run_type"] = "scoring"
         return context
 
-class LoadModelArtifactsStep:
+class PrepareScoringContextStep:
+    """
+    Prepare scoring context:
+      - validates presence of model_spec + data
+      - resolves shared feature columns
+      - pre-computes schema hash (feature-only)
+    """
+    def __call__(self, context: ModelContext) -> ModelContext:
+        logger.info("Preparing scoring context")
+        context["status"] = "preparing_scoring"
 
-class ScoreModelStep:
+        data: pd.DataFrame = context.get("data")
+        spec: dict = context.get("model_specs")
+
+        if data is None or not isinstance(data, pd.DataFrame):
+            raise ValueError("PrepareScoringContextStep expected context['data'] as a pandas DataFrame")
+        if not spec or not isinstance(spec, dict):
+            raise ValueError("PrepareScoringContextStep expected context['model_specs'] as a dict spec bundle")
+
+        columns = spec.get("columns") or {}
+        feature_columns: List[str] = columns.get("feature", []) or []
+        if not feature_columns:
+            raise ValueError("No feature columns found in model_specs['columns']['feature']")
+
+        missing_features = [c for c in feature_columns if c not in data.columns]
+        if missing_features:
+            raise ValueError(f"Missing feature columns in scoring data: {missing_features}")
+
+        context["resolved_feature_columns"] = feature_columns
+        context["resolved_schema_hash"] = stable_schema_hash(feature_columns)
+        context["X_shared"] = data[feature_columns].copy()
+        return context
+
+
+class LoadModelArtifactsStep:
+    def __call__(self, context: ModelContext) -> ModelContext:
+        raise NotImplementedError("LoadModelArtifactsStep is not implemented yet.")
+
+
+class ScoreModelsStep:
+    def __call__(self, context: ModelContext) -> ModelContext:
+        raise NotImplementedError("ScoreModelsStep is not implemented yet.")
+
 
 class PersistScoringResultsStep:
-
-class FinalizeScoringRunStep:
+    def __call__(self, context: ModelContext) -> ModelContext:
+        raise NotImplementedError("PersistScoringResultsStep is not implemented yet.")
 
 ### Pipeline registry / factory ###
 ModelPipelineFactory = Callable[[], Sequence[ModelStep]]
@@ -226,10 +627,11 @@ def default_model_training_pipeline_factory() -> tuple[ModelStep, ...]:
         StartTrainingRunStep(),
         LoadModelSpecStep(),
         LoadDataStep(),
-        TrainModelStep(),
-        EvaluateModelStep(),
+        PrepareTrainingContextStep(),
+        BuildTrainingPayloadsStep(),
+        TrainModelsStep(),
+        EvaluateModelsStep(),
         PersistModelArtifactsStep(),
-        FinalizeTrainingRunStep(),
     )
     return pipeline_steps
 
@@ -250,14 +652,15 @@ def default_model_scoring_pipeline_factory() -> tuple[ModelStep, ...]:
         StartScoringRunStep(),
         LoadModelSpecStep(),
         LoadDataStep(),
+        PrepareScoringContextStep(),
         LoadModelArtifactsStep(),
-        ScoreModelStep(),
+        ScoreModelsStep(),
         PersistScoringResultsStep(),
-        FinalizeScoringRunStep(),
     )
     return pipeline_steps
+
 
 # Register the default orchestration pipeline at import time.
 #NOTE: Register the pipelines here if you want to use them in the orchestrator
 register_model_pipeline("default_model_training", default_model_training_pipeline_factory)
-register_model_pipeline("default_model_scoring", default_model_scoring_pipeline_factory)
+register_model_pipeline("default_model_scoring", default_model_scoring_pipeline_factory)    

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from functions.config.settings import get_settings
 from functions.logging.logger import get_logger
-from functions.data_sources.sql_client import SqlClient
+from functions.sql.sql_client import SqlClient
 from uuid import UUID
 
+from functions.ml_models.ml_pipelines import ModelContext, build_model_pipeline_for
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -15,7 +16,7 @@ def orchestrate_model_training(
     sql_client: SqlClient,
     system_event_id: UUID,
     pipeline_name: str = "default_model_training",
-    model_key: str,
+    model_group_key: str,
 ) -> None:
     """
     High‑level orchestration entrypoint for the model training phase.
@@ -48,7 +49,7 @@ def orchestrate_model_scoring(
     sql_client: SqlClient,
     system_event_id: UUID,
     pipeline_name: str = "default_model_scoring",
-    model_key: str,
+    model_group_key: str,
 ) -> None:
     """
     High‑level orchestration entrypoint for the model scoring phase.

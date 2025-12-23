@@ -9,6 +9,7 @@ from azure.identity import DefaultAzureCredential
 import pyodbc
 import struct 
 import pandas as pd
+import json
 
 from functions.config.settings import AppSettings
 from functions.logging.logger import get_logger
@@ -867,7 +868,9 @@ class SqlClient:
                             PredictionType,
                             IsEnabled,
                             SampleWeightColumn,
-                            TimeColumn
+                            TimeColumn,
+                            ModelParametersJson,
+                            TrainerParametersJson
                         FROM dbo.ModelRegistry
                         WHERE ModelGroupKey = :model_group_key
                         ORDER BY ModelKey;
@@ -881,6 +884,32 @@ class SqlClient:
 
                 models = []
                 for row in model_rows:
+                    # First need to make sure that the ModelParametersJson is valid JSON and can be parsed
+                    raw_model_params = row[7]
+                    raw_trainer_params = row[8]
+
+                    if raw_model_params is None or str(raw_model_params).strip() == "":
+                        model_params = {}
+
+                    else:
+                        try:
+                            model_params = json.loads(raw_model_params)
+                        except json.JSONDecodeError as e:
+                            raise ValueError(
+                                f"Invalid JSON in ModelRegistry.ModelParametersJson for ModelKey={row[0]!r}: {e}"
+                            ) from e
+                        
+                    if raw_trainer_params is None or str(raw_trainer_params).strip() == "":
+                        trainer_params = {}
+                    else:
+                        try:
+                            trainer_params = json.loads(raw_trainer_params)
+                        except json.JSONDecodeError as e:
+                            raise ValueError(
+                                f"Invalid JSON in ModelRegistry.TrainerParametersJson for ModelKey={row[0]!r}: {e}"
+                            ) from e
+                    
+                    # append the model spec
                     models.append(
                         {
                             "model_key": row[0],
@@ -890,6 +919,8 @@ class SqlClient:
                             "is_enabled": bool(row[4]),
                             "sample_weight_column": row[5],
                             "time_column": row[6],
+                            "model_parameters": model_params,
+                            "trainer_parameters": trainer_params,
                         }
                     )
 
