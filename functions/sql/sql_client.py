@@ -1012,3 +1012,100 @@ class SqlClient:
         except Exception as e:
             logger.error("Error getting model source data for source_table='%s' and columns_to_select='%s': %s", source_table, columns_to_select, e)
             raise
+
+
+    def persist_artifact_metadata(
+        self,
+        *,
+        system_event_id: str,
+        model_key: str,
+        trainer_key: str,
+        prediction_type: str,
+        target_column: str,
+        schema_hash: str,
+        artifact_version: int,
+        blob_container: str,
+        blob_path: str,
+        metrics: dict | None,
+    ) -> tuple[str, int]:
+        """
+        Insert a ModelArtifacts row and return (artifact_id, artifact_version).
+        """
+        try:
+            metrics_json = json.dumps(metrics) if metrics is not None else None
+
+            sql = sa.text("""
+                INSERT INTO dbo.ModelArtifacts (
+                    ArtifactId,
+                    ArtifactVersion,
+                    SystemEventId,
+                    ModelKey,
+                    TrainerKey,
+                    PredictionType,
+                    TargetColumn,
+                    SchemaHash,
+                    BlobContainer,
+                    BlobPath,
+                    Metrics
+                )
+                OUTPUT inserted.ArtifactId
+                VALUES (
+                    NEWID(),
+                    :artifact_version,
+                    :system_event_id,
+                    :model_key,
+                    :trainer_key,
+                    :prediction_type,
+                    :target_column,
+                    :schema_hash,
+                    :blob_container,
+                    :blob_path,
+                    :metrics
+                );
+            """)
+
+            with self.engine.begin() as conn:
+                artifact_id = conn.execute(
+                    sql,
+                    {
+                        "artifact_version": artifact_version,
+                        "system_event_id": system_event_id,
+                        "model_key": model_key,
+                        "trainer_key": trainer_key,
+                        "prediction_type": prediction_type,
+                        "target_column": target_column,
+                        "schema_hash": schema_hash,
+                        "blob_container": blob_container,
+                        "blob_path": blob_path,
+                        "metrics": metrics_json,
+                    },
+                ).scalar_one()
+
+            return str(artifact_id), artifact_version
+
+        except Exception as e:
+            logger.error("Error persisting model artifact metadata: %s", e)
+            raise
+
+    def get_next_artifact_version(self, *, model_key: str) -> int:
+        """
+        Get the next artifact version number for a given model_key.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT ISNULL(MAX(ArtifactVersion), 0) + 1
+                        FROM dbo.ModelArtifacts
+                        WHERE ModelKey = :model_key;
+                        """
+                    ),
+                    {"model_key": model_key},
+                )
+                next_version = result.scalar()
+                return next_version
+        except Exception as e:
+            logger.error("Error getting next artifact version for model_key='%s': %s", model_key, e)
+            raise   
+

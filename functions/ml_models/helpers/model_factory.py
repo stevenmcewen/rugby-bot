@@ -8,16 +8,6 @@ from xgboost import XGBClassifier, XGBRegressor
 
 ModelBuilder = Callable[[dict], Any]
 
-
-def normalize_prediction_type(prediction_type: str) -> str:
-    pt = (prediction_type or "").strip().lower()
-    if pt in {"binary", "classification", "classify"}:
-        return "classification"
-    if pt in {"regression", "regress"}:
-        return "regression"
-    raise ValueError(f"Unknown prediction_type='{prediction_type}'")
-
-
 # Business model keys -> allowed prediction types
 MODEL_COMPATIBILITY: dict[str, Set[str]] = {
     "international_rugby_homewin_v1": {"classification"},
@@ -51,7 +41,7 @@ def build_xgb_regressor(params: dict) -> Any:
 class ModelBuildContext:
     model_key: str
     prediction_type: str 
-    user_params: Optional[dict] = None
+    model_params: Optional[dict] = None
 
 
 class ModelFactory:
@@ -73,13 +63,23 @@ class ModelFactory:
             )
 
         params: dict = {}
-        if ctx.user_params:
+        if ctx.model_params:
             # check that params are in the correct format
-            if not isinstance(ctx.user_params, dict):
-                raise ValueError("user_params must be a dictionary")
-            params.update(ctx.user_params)
+            if not isinstance(ctx.model_params, dict):
+                raise ValueError("model_params must be a dictionary")
+            params.update(ctx.model_params)
 
         # Build model
         builder = MODEL_REGISTRY[ctx.model_key]
         model = builder(params)
         return model
+
+
+# helpers
+def normalize_prediction_type(prediction_type: str) -> str:
+    pt = (prediction_type or "").strip().lower()
+    if pt in {"binary", "classification", "classify"}:
+        return "classification"
+    if pt in {"regression", "regress"}:
+        return "regression"
+    raise ValueError(f"Unknown prediction_type='{prediction_type}'")

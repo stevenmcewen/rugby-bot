@@ -103,14 +103,6 @@ class EvaluationResult:
     metrics: Dict[str, float]
     evaluated_at_utc: str
 
-
-@dataclass
-class PersistedArtifact:
-    model_key: str
-    artifact_id: str
-    artifact_version: str
-    persisted_at_utc: str
-
 ### Step implementations: Shared pipelines ###
 
 class LoadModelSpecStep:
@@ -374,7 +366,6 @@ class TrainModelsStep:
     def __call__(self, context: ModelContext) -> ModelContext:
         logger.info("Training models")
         context["status"] = "training_models"
-        sql_client: SqlClient = context["sql_client"]
 
         # get the schema hash and the train payloads from the context
         schema_hash: str = context["resolved_schema_hash"]
@@ -475,7 +466,6 @@ class EvaluateModelsStep:
 class PersistModelArtifactsStep:
     """
     Persist each trained model artifact + its evaluation metrics.
-    Stores: context['persisted_artifacts'] = {model_key: PersistedArtifact}
     """
 
     def __call__(self, context: ModelContext) -> ModelContext:
@@ -491,32 +481,32 @@ class PersistModelArtifactsStep:
         if not trained_models:
             raise ValueError("No trained_models found in context. Run TrainModelsStep first.")
 
-        persisted: Dict[str, PersistedArtifact] = {}
-
         for model_key, tm in trained_models.items():
             metrics = eval_results.get(model_key).metrics if model_key in eval_results else {}
+            try:
+                logger.info("Persisting artifact for model_key=%s", model_key)
+                artifact_bytes = serialize_model_artifact(tm.model_object)
 
-            artifact_bytes = serialize_model_artifact(tm.model_object)
+                artefact_id, artefact_version = persist_model_artifact(
+                    sql_client=sql_client,
+                    system_event_id=system_event_id,
+                    model_key=tm.model_key,
+                    trainer_key=tm.trainer_key,
+                    prediction_type=tm.prediction_type,
+                    target_column=tm.target_column,
+                    schema_hash=tm.schema_hash,
+                    metrics=metrics,
+                    artifact_bytes=artifact_bytes,
+                )
 
-            persisted_artifact = persist_model_artifact(
-                sql_client=sql_client,
-                system_event_id=system_event_id,
-                model_key=tm.model_key,
-                trainer_key=tm.trainer_key,
-                prediction_type=tm.prediction_type,
-                target_column=tm.target_column,
-                schema_hash=tm.schema_hash,
-                metrics=metrics,
-                artifact_bytes=artifact_bytes,
-            )
+                logger.info(
+                    "Persisted model_key=%s artifact_id=%s version=%s",
+                    model_key, artefact_id, artefact_version
+                )
+            except Exception as e:
+                logger.error("Error persisting artifact for model_key=%s: %s", model_key, e)
+                raise
 
-            persisted[model_key] = persisted_artifact
-            logger.info(
-                "Persisted model_key=%s artifact_id=%s version=%s",
-                model_key, persisted_artifact.artifact_id, persisted_artifact.artifact_version
-            )
-
-        context["persisted_artifacts"] = persisted
         context["status"] = "persisted"
         return context
 

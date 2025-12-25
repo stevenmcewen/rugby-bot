@@ -227,7 +227,7 @@ class WriteRawSnapshotsToBlobStep:
                 blob_name=blob_name,
             )
 
-            # Upload the actual file contents, not just the local path string.
+            # Upload the file contents to Blob Storage
             with open(local_path, "rb") as data:
                 blob_client.upload_blob(data, overwrite=True)
 

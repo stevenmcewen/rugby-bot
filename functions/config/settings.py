@@ -25,6 +25,7 @@ class AppSettings:
 
     storage_connection: str | None = None
     raw_container_name: str | None = None
+    artifact_container_name: str | None = None
     kaggle_dataset: str | None = None
 
     enable_scheduled_functions: bool = False
@@ -87,6 +88,7 @@ def get_settings() -> AppSettings:
         default_env_var="AzureWebJobsStorage",
     )
     raw_container_name = get_secret(secret_name="RAW-INGESTION-CONTAINER")
+    artifact_container_name = get_secret(secret_name="ARTIFACT-CONTAINER")
 
     # Treat a missing or unset flag as "false" so local dev / tests
     # without Key Vault configured don't crash on `.lower()`.
@@ -102,6 +104,7 @@ def get_settings() -> AppSettings:
         sql_database=sql_database,
         storage_connection=storage_connection,
         raw_container_name=raw_container_name,
+        artifact_container_name=artifact_container_name,
         enable_scheduled_functions=enable_scheduled_functions,
         kaggle_dataset=kaggle_dataset,
     )
