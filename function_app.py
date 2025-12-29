@@ -272,214 +272,214 @@ def TrainInternationalRugbyFixturesModelFunction(timer: func.TimerRequest) -> No
 # #------------------------------------------------------------------------------------------------
 # # Testing functions
 # #------------------------------------------------------------------------------------------------
-# insert test
-@app.route(route="IngestRugby365ResultsFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
-def IngestRugby365ResultsFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Ingest Rugby365 results data into the database.
-    """
+# # insert test
+# @app.route(route="IngestRugby365ResultsFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
+# def IngestRugby365ResultsFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
+#     """
+#     Ingest Rugby365 results data into the database.
+#     """
 
-    logger.info("IngestRugby365ResultsFunction triggered.")
+#     logger.info("IngestRugby365ResultsFunction triggered.")
 
-    system_event = sql_client.start_system_event(
-        function_name="IngestRugby365ResultsFunctionTest",
-        trigger_type="test",
-        event_type="ingestion",
-    )
+#     system_event = sql_client.start_system_event(
+#         function_name="IngestRugby365ResultsFunctionTest",
+#         trigger_type="test",
+#         event_type="ingestion",
+#     )
 
-    try:
-        ingest_rugby365_results(sql_client=sql_client, system_event_id=system_event.id)
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="succeeded",
-        )
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "message": "IngestRugby365ResultsFunctionTest triggered",
-                    "system_event_id": str(system_event.id),
-                }
-            ),
-            status_code=200,
-            mimetype="application/json",
-        )
-    except Exception as exc: 
-        logger.exception("IngestRugby365ResultsFunctionTest failed.")
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="failed",
-            details=str(exc),
-        )
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "status": "error",
-                    "message": "IngestRugby365ResultsFunctionTest failed",
-                    "system_event_id": str(system_event.id),
-                }
-            ),
-            status_code=500,
-            mimetype="application/json",
-        )
-        raise
+#     try:
+#         ingest_rugby365_results(sql_client=sql_client, system_event_id=system_event.id)
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="succeeded",
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "ok",
+#                     "message": "IngestRugby365ResultsFunctionTest triggered",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=200,
+#             mimetype="application/json",
+#         )
+#     except Exception as exc: 
+#         logger.exception("IngestRugby365ResultsFunctionTest failed.")
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="failed",
+#             details=str(exc),
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "error",
+#                     "message": "IngestRugby365ResultsFunctionTest failed",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=500,
+#             mimetype="application/json",
+#         )
+#         raise
 
-# Ingest Rugby365 fixtures data into the database.
-@app.route(route="IngestRugby365FixturesFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
-def IngestRugby365FixturesFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Ingest Rugby365 fixtures data into the database.
-    """
+# # Ingest Rugby365 fixtures data into the database.
+# @app.route(route="IngestRugby365FixturesFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
+# def IngestRugby365FixturesFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
+#     """
+#     Ingest Rugby365 fixtures data into the database.
+#     """
 
-    logger.info("IngestRugby365FixturesFunctionTest triggered.")
+#     logger.info("IngestRugby365FixturesFunctionTest triggered.")
 
-    system_event = sql_client.start_system_event(
-        function_name="IngestRugby365FixturesFunctionTest",
-        trigger_type="test",
-        event_type="ingestion",
-    )
+#     system_event = sql_client.start_system_event(
+#         function_name="IngestRugby365FixturesFunctionTest",
+#         trigger_type="test",
+#         event_type="ingestion",
+#     )
 
-    try:
-        ingest_rugby365_fixtures(sql_client=sql_client, system_event_id=system_event.id)
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="succeeded",
-        )
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "message": "IngestRugby365FixturesFunctionTest triggered",
-                    "system_event_id": str(system_event.id),
-                }
-            ),
-            status_code=200,
-            mimetype="application/json",
-        )
-    except Exception as exc: 
-        logger.exception("IngestRugby365FixturesFunctionTest failed.")
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="failed",
-            details=str(exc),
-        )
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "status": "error",
-                    "message": "IngestRugby365FixturesFunctionTest failed",
-                    "system_event_id": str(system_event.id),
-                }
-            ),
-            status_code=500,
-            mimetype="application/json",
-        )
-        raise
+#     try:
+#         ingest_rugby365_fixtures(sql_client=sql_client, system_event_id=system_event.id)
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="succeeded",
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "ok",
+#                     "message": "IngestRugby365FixturesFunctionTest triggered",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=200,
+#             mimetype="application/json",
+#         )
+#     except Exception as exc: 
+#         logger.exception("IngestRugby365FixturesFunctionTest failed.")
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="failed",
+#             details=str(exc),
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "error",
+#                     "message": "IngestRugby365FixturesFunctionTest failed",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=500,
+#             mimetype="application/json",
+#         )
+#         raise
 
-# Preprocess test.
-@app.route(route="PreprocessTest", auth_level=func.AuthLevel.ANONYMOUS)
-def PreprocessTest(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Preprocess test.
-    """
-    logger.info("PreprocessTest triggered.")
+# # Preprocess test.
+# @app.route(route="PreprocessTest", auth_level=func.AuthLevel.ANONYMOUS)
+# def PreprocessTest(req: func.HttpRequest) -> func.HttpResponse:
+#     """
+#     Preprocess test.
+#     """
+#     logger.info("PreprocessTest triggered.")
 
-    system_event = sql_client.start_system_event(
-        function_name="PreprocessTest",
-        trigger_type="test",
-        event_type="preprocessing",
-    )
+#     system_event = sql_client.start_system_event(
+#         function_name="PreprocessTest",
+#         trigger_type="test",
+#         event_type="preprocessing",
+#     )
 
-    try:
-        orchestrate_preprocessing(
-            sql_client=sql_client, 
-            system_event_id=system_event.id
-        )
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="succeeded",
-        )
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "message": "PreprocessTest triggered",
-                    "system_event_id": str(system_event.id),
-                }
-            ),
-            status_code=200,
-            mimetype="application/json",
-        )
-    except Exception as exc:
-        logger.exception("PreprocessTest failed.")
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="failed",
-            details=str(exc),
-        )
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "status": "error",
-                    "message": "PreprocessTest failed",
-                    "system_event_id": str(system_event.id),
-                }
-            ),
-            status_code=500,
-            mimetype="application/json",
-        )
-        raise
+#     try:
+#         orchestrate_preprocessing(
+#             sql_client=sql_client, 
+#             system_event_id=system_event.id
+#         )
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="succeeded",
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "ok",
+#                     "message": "PreprocessTest triggered",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=200,
+#             mimetype="application/json",
+#         )
+#     except Exception as exc:
+#         logger.exception("PreprocessTest failed.")
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="failed",
+#             details=str(exc),
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "error",
+#                     "message": "PreprocessTest failed",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=500,
+#             mimetype="application/json",
+#         )
+#         raise
 
-# Train international rugby fixtures model.
-@app.route(route="TrainInternationalRugbyFixturesModelFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
-def TrainInternationalRugbyFixturesModelFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Train international rugby fixtures model.
-    """
-    logger.info("TrainInternationalRugbyFixturesModelFunctionTest triggered.")
-    system_event = sql_client.start_system_event(
-        function_name="TrainInternationalRugbyFixturesModelFunctionTest",
-        trigger_type="test",
-        event_type="model_training",
-    )
-    try:
-        orchestrate_model_training(
-            sql_client=sql_client,
-            system_event_id=system_event.id,
-            pipeline_name="default_model_training",
-            model_group_key="international_rugby_fixtures",
-        )
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="succeeded",
-        )
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "message": "TrainInternationalRugbyFixturesModelFunctionTest triggered",
-                    "system_event_id": str(system_event.id),
-                }
-            ),
-            status_code=200,
-            mimetype="application/json",
-        )
-    except Exception as exc:
-        logger.exception("TrainInternationalRugbyFixturesModelFunctionTest failed.")
-        sql_client.complete_system_event(
-            system_event_id=system_event.id,
-            status="failed",
-            details=str(exc),
-        )
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "status": "error",
-                    "message": "TrainInternationalRugbyFixturesModelFunctionTest failed",
-                    "system_event_id": str(system_event.id),
-                }
-            ),
-            status_code=500,
-            mimetype="application/json",
-        )
-        raise
+# # Train international rugby fixtures model.
+# @app.route(route="TrainInternationalRugbyFixturesModelFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
+# def TrainInternationalRugbyFixturesModelFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
+#     """
+#     Train international rugby fixtures model.
+#     """
+#     logger.info("TrainInternationalRugbyFixturesModelFunctionTest triggered.")
+#     system_event = sql_client.start_system_event(
+#         function_name="TrainInternationalRugbyFixturesModelFunctionTest",
+#         trigger_type="test",
+#         event_type="model_training",
+#     )
+#     try:
+#         orchestrate_model_training(
+#             sql_client=sql_client,
+#             system_event_id=system_event.id,
+#             pipeline_name="default_model_training",
+#             model_group_key="international_rugby_fixtures",
+#         )
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="succeeded",
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "ok",
+#                     "message": "TrainInternationalRugbyFixturesModelFunctionTest triggered",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=200,
+#             mimetype="application/json",
+#         )
+#     except Exception as exc:
+#         logger.exception("TrainInternationalRugbyFixturesModelFunctionTest failed.")
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="failed",
+#             details=str(exc),
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "error",
+#                     "message": "TrainInternationalRugbyFixturesModelFunctionTest failed",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=500,
+#             mimetype="application/json",
+#         )
+#         raise

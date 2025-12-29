@@ -13,6 +13,7 @@ import json
 
 from functions.config.settings import AppSettings
 from functions.logging.logger import get_logger
+from functions.utils.utils import normalize_dataframe_dtypes
 
 logger = get_logger(__name__)
 
@@ -1008,7 +1009,8 @@ class SqlClient:
                 result = conn.execute(sa.text(f"SELECT {', '.join(columns_to_select)} FROM {source_table}"))
                 rows = result.fetchall()
                 df = pd.DataFrame(rows, columns=columns_to_select)
-                return df
+                normalized_df = normalize_dataframe_dtypes(df)
+                return normalized_df
         except Exception as e:
             logger.error("Error getting model source data for source_table='%s' and columns_to_select='%s': %s", source_table, columns_to_select, e)
             raise

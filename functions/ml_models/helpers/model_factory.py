@@ -29,12 +29,21 @@ def register_model(model_key: str) -> Callable[[ModelBuilder], ModelBuilder]:
 
 @register_model("international_rugby_homewin_v1")
 def build_xgb_classifier(params: dict) -> Any:
-    return XGBClassifier(**params)
+    # Keep XGBoost-specific defaults here (not in orchestration pipelines).
+    # This enables training with pandas categorical columns without requiring
+    # every caller/pipeline to know about XGBoost quirks.
+    p = dict(params or {})
+    p.setdefault("enable_categorical", True)
+    p.setdefault("tree_method", "hist")
+    return XGBClassifier(**p)
 
 
 @register_model("international_rugby_pointdiff_v1")
 def build_xgb_regressor(params: dict) -> Any:
-    return XGBRegressor(**params)
+    p = dict(params or {})
+    p.setdefault("enable_categorical", True)
+    p.setdefault("tree_method", "hist")
+    return XGBRegressor(**p)
 
 
 @dataclass(frozen=True)

@@ -111,6 +111,11 @@ def upload_bytes_to_blob(*, container_name: str, blob_path: str, data: bytes) ->
     Returns:
         None
     """
+    # Check if the container name and storage connection are configured before attempting to upload
+    if not container_name:
+        raise ValueError("container_name must be provided (artifact container is not configured)")
+    if not settings.storage_connection:
+        raise ValueError("storage_connection is not configured")
 
     blob_client = BlobClient.from_connection_string(
                 conn_str=settings.storage_connection,
@@ -120,6 +125,3 @@ def upload_bytes_to_blob(*, container_name: str, blob_path: str, data: bytes) ->
 
     blob_client.upload_blob(data, overwrite=True)
 
-
-
-   

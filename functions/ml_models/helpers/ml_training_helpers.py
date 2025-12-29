@@ -14,7 +14,6 @@ from sklearn.metrics import (
 )
 
 from functions.logging.logger import get_logger
-from functions.ml_models.ml_pipelines import TrainPayload
 
 from functions.ml_models.helpers.model_factory import ModelFactory, ModelBuildContext
 from functions.ml_models.helpers.trainer_factory import TrainerFactory, TrainerBuildContext

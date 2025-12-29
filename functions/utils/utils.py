@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 import hashlib
+from decimal import Decimal
+from typing import Any
 
 from functions.logging.logger import get_logger
 
@@ -137,3 +139,83 @@ def uct_now_iso() -> str:
     iso_time = south_africa.isoformat()
 
     return iso_time
+
+def normalize_dataframe_dtypes(
+    df: pd.DataFrame,
+    *,
+    numeric_parse_threshold: float = 0.95,
+    max_categories: int = 50,
+) -> pd.DataFrame:
+    """
+    Normalize a DataFrame's dtypes after loading from external sources (e.g. SQL).
+
+    Why this exists:
+    - SQL DECIMAL columns often arrive in Python as `decimal.Decimal`, which forces
+      pandas to use dtype=object. Many ML libs expect numeric dtypes.
+    - Some connectors also return numeric values as strings.
+
+    Strategy (generic, model-agnostic):
+    - Convert pandas extension dtypes where possible (`convert_dtypes`).
+    - For object/string columns:
+      - If values are mostly numeric-like, coerce to float.
+      - Else if low-cardinality, coerce to `category`.
+      - Else keep as pandas `string` dtype (not object).
+    Accepts:
+    - A pandas DataFrame
+    - A numeric_parse_threshold
+    - A max_categories
+    Returns:
+    - A pandas DataFrame with the dtypes normalized
+    Raises:
+    - ValueError if df is not a pandas DataFrame
+    """
+    # Check if the dataframe is valid
+    if df is None or not isinstance(df, pd.DataFrame):
+        raise ValueError("df must be a pandas DataFrame")
+
+    # Check if the dataframe is empty
+    if df.empty:
+        return df
+
+    # Copy the dataframe
+    out = df.copy()
+    # Convert the dtypes of the dataframe
+    out = out.convert_dtypes()
+    n_rows = len(out)
+
+    # Iterate over the columns of the dataframe
+    for col in out.columns:
+        s = out[col]
+
+        # Check if the column is an object or string dtype and if not, continue to the next column
+        if not (pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s)):
+            continue
+
+        # Fast path: SQL DECIMAL often arrives as Decimal objects -> cast to float.
+        non_null = s.dropna()
+        if not non_null.empty:
+            # Check if every non-null is a Decimal (or int/float), if so, cast to float
+            if non_null.map(lambda v: isinstance(v, (Decimal, int, float))).all():
+                out[col] = pd.to_numeric(s, errors="coerce").astype("Float64")
+                continue
+
+        # Cast the column to a string dtype and strip the whitespace and replace empty strings with NA
+        s_str = s.astype("string").str.strip().replace({"": pd.NA})
+        s_num = pd.to_numeric(s_str, errors="coerce")
+
+        non_na_ratio = float(s_num.notna().mean())
+        if non_na_ratio >= numeric_parse_threshold and s_num.notna().any():
+            out[col] = s_num.astype("Float64")
+            continue
+
+        # Low-cardinality -> category
+        # (Use nunique on original values, not stringified, to preserve semantics.)
+        nunique = int(non_null.nunique()) if not non_null.empty else 0
+        if nunique > 0 and nunique <= max_categories and (nunique / max(n_rows, 1)) <= 0.5:
+            out[col] = s.astype("category")
+            continue
+
+        # Otherwise keep as string dtype (avoid raw object)
+        out[col] = s_str
+
+    return out
