@@ -10,7 +10,6 @@ omit =
     */__init__.py
 
     # Example template/boilerplate modules to skip (uncomment or add your own):
-    functions/ml_models/services.py
     functions/notifications/services.py
 
 

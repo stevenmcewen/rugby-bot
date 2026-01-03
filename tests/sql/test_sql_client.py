@@ -804,3 +804,238 @@ def test_get_last_ingestion_event_created_at_parses_sql_string_format(monkeypatc
         integration_type="results",
     )
     assert result == datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f")
+
+
+def test_get_model_specs_by_model_group_key_happy_path(monkeypatch):
+    """
+    get_model_specs_by_model_group_key
+    - returns group + enabled models + active columns by role
+    - parses JSON params
+    - enforces single active weight column
+    """
+
+    class Conn:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+            sql_txt = str(sql)
+
+            if "FROM dbo.ModelGroup" in sql_txt:
+                class R:
+                    def fetchone(self_inner):
+                        return ("group1", "dbo.Train", "dbo.Score", 1)
+                return R()
+
+            if "FROM dbo.ModelRegistry" in sql_txt:
+                class R:
+                    def fetchall(self_inner):
+                        # (ModelKey, TrainerKey, TargetColumn, PredictionType, IsEnabled, SampleWeightColumn, TimeColumn, ModelParametersJson, TrainerParametersJson)
+                        return [
+                            ("m1", "t1", "Y1", "classification", 1, None, "MatchDate", '{"a": 1}', '{"dropna": false}'),
+                            ("m2", "t2", "Y2", "regression", 0, None, None, None, None),  # disabled
+                        ]
+                return R()
+
+            if "FROM dbo.ModelColumn" in sql_txt:
+                class R:
+                    def fetchall(self_inner):
+                        # (ColumnName, ColumnRole, IsActive, OrdinalPosition)
+                        return [
+                            ("ID", "entity", 1, 1),
+                            ("F1", "feature", 1, 1),
+                            ("F2", "feature", 1, 2),
+                            ("W", "weight", 1, 1),
+                            ("Y1", "target", 0, 1),  # inactive target role ignored
+                        ]
+                return R()
+
+            raise AssertionError(f"Unexpected SQL: {sql_txt}")
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = Engine()
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    spec = client.get_model_specs_by_model_group_key(model_group_key="group1")
+    assert spec["model_group_key"] == "group1"
+    assert spec["training_dataset_source"] == "dbo.Train"
+    assert spec["scoring_dataset_source"] == "dbo.Score"
+    assert spec["is_enabled"] is True
+
+    assert [m["model_key"] for m in spec["models"]] == ["m1"]
+    assert spec["models"][0]["model_parameters"] == {"a": 1}
+    assert spec["models"][0]["trainer_parameters"] == {"dropna": False}
+
+    assert spec["columns"]["entity"] == ["ID"]
+    assert spec["columns"]["feature"] == ["F1", "F2"]
+    assert spec["columns"]["weight"] == "W"
+
+
+def test_get_model_specs_by_model_group_key_raises_if_group_disabled(monkeypatch):
+    class Conn:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, sql, params):
+            sql_txt = str(sql)
+            if "FROM dbo.ModelGroup" in sql_txt:
+                class R:
+                    def fetchone(self_inner):
+                        return ("group1", "dbo.Train", "dbo.Score", 0)
+                return R()
+            raise AssertionError("Should not query other tables when group disabled")
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = Engine()
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    with pytest.raises(ValueError, match="disabled"):
+        client.get_model_specs_by_model_group_key(model_group_key="group1")
+
+
+def test_get_model_specs_by_model_group_key_raises_on_invalid_json(monkeypatch):
+    class Conn:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, sql, params):
+            sql_txt = str(sql)
+            if "FROM dbo.ModelGroup" in sql_txt:
+                class R:
+                    def fetchone(self_inner):
+                        return ("group1", "dbo.Train", "dbo.Score", 1)
+                return R()
+            if "FROM dbo.ModelRegistry" in sql_txt:
+                class R:
+                    def fetchall(self_inner):
+                        return [
+                            ("m1", "t1", "Y1", "classification", 1, None, None, "{bad json", "{}"),
+                        ]
+                return R()
+            raise AssertionError("Columns query should not be reached on JSON error")
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = Engine()
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    with pytest.raises(ValueError, match="Invalid JSON"):
+        client.get_model_specs_by_model_group_key(model_group_key="group1")
+
+
+def test_get_model_source_data_returns_normalized_dataframe(monkeypatch):
+    rows = [(1, "2"), (3, "4")]
+
+    class Result:
+        def fetchall(self):
+            return rows
+
+    class Conn:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, sql):
+            return Result()
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = Engine()
+
+    called = {"normalized": False}
+    monkeypatch.setattr(sql_mod, "normalize_dataframe_dtypes", lambda df: (called.__setitem__("normalized", True) or df))
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    df = client.get_model_source_data(source_table="dbo.Source", columns_to_select=["a", "b"])
+    assert called["normalized"] is True
+    assert df.to_dict(orient="records") == [{"a": 1, "b": "2"}, {"a": 3, "b": "4"}]
+
+
+def test_persist_artifact_metadata_inserts_and_returns_id_and_version(monkeypatch):
+    executed = {}
+
+    class ScalarResult:
+        def scalar_one(self):
+            return uuid4()
+
+    class BeginConn:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, sql, params):
+            executed["params"] = params
+            return ScalarResult()
+
+    class Engine:
+        def begin(self):
+            return BeginConn()
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = Engine()
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    artifact_id, version = client.persist_artifact_metadata(
+        system_event_id="sys",
+        model_key="m1",
+        trainer_key="t1",
+        prediction_type="classification",
+        target_column="Y",
+        schema_hash="h",
+        artifact_version=3,
+        blob_container="c",
+        blob_path="p",
+        metrics={"acc": 0.9},
+    )
+
+    assert version == 3
+    assert isinstance(artifact_id, str)
+    assert executed["params"]["artifact_version"] == 3
+    assert executed["params"]["metrics"] == '{"acc": 0.9}'
+
+
+def test_get_next_artifact_version_returns_scalar(monkeypatch):
+    class Result:
+        def scalar(self):
+            return 5
+
+    class Conn:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, sql, params):
+            return Result()
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = Engine()
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    assert client.get_next_artifact_version(model_key="m1") == 5
