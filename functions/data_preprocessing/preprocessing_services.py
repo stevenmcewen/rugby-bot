@@ -91,7 +91,8 @@ class PreprocessingPlan:
     blob_path: str
     target_table: str
     pipeline_name: str
-
+    source_table: str | None
+    execution_order: int
 
 @dataclass()
 class PreprocessingEvent:
@@ -105,9 +106,11 @@ class PreprocessingEvent:
     integration_provider: str
     container_name: str
     blob_path: str
+    source_table: str | None 
     target_table: str
     pipeline_name: str
     status: str
+    execution_order: int
     error_message: str | None
 
 ### Step implementations ###
@@ -174,6 +177,8 @@ class BuildPreprocessingPlansStep:
                         blob_path=ingestion_source.blob_path,
                         target_table=source_target_mapping["target_table"],
                         pipeline_name=source_target_mapping["pipeline_name"],
+                        source_table=source_target_mapping["source_table"],
+                        execution_order=source_target_mapping["execution_order"],
                     )
                     preprocessing_plans.append(preprocessing_plan)
             context["preprocessing_plans"] = preprocessing_plans
@@ -207,6 +212,8 @@ class PersistPreprocessingEventsStep:
                     container_name=preprocessing_event_details["container_name"],
                     blob_path=preprocessing_event_details["blob_path"],
                     target_table=preprocessing_event_details["target_table"],
+                    source_table=preprocessing_event_details["source_table"],
+                    execution_order=preprocessing_event_details["execution_order"],
                     pipeline_name=preprocessing_event_details["pipeline_name"],
                     status=preprocessing_event_details["status"],
                     error_message=preprocessing_event_details["error_message"],
@@ -233,7 +240,10 @@ class RunPreprocessingPipelinesStep:
         ingestion_sources = context["ingestion_sources"]
         try:
             sql_client: SqlClient = context["sql_client"]
-            for preprocessing_event in preprocessing_events:
+            # sort the preprocessing events by execution order
+            preprocessing_events_sorted = sorted(preprocessing_events, key=lambda e: e.execution_order)
+            # loop through each preprocessing event and run the preprocessing pipeline
+            for preprocessing_event in preprocessing_events_sorted:
                 run_preprocessing_pipeline(preprocessing_event, sql_client)
                 if preprocessing_event.status == "succeeded":
                     sql_client.update_preprocessing_event(preprocessing_event_id=preprocessing_event.id, status="succeeded")

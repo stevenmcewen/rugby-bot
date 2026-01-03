@@ -114,4 +114,50 @@ def test_drop_na_rows_empty_columns_raises_value_error():
     with pytest.raises(ValueError):
         utils.drop_na_rows(df, columns=[])
 
+# Does the roll_mean function shift and use min_periods_1?
+# must shift and use min_periods_1
+def test_roll_mean_shifts_and_uses_min_periods_1():
+    s = pd.Series([1.0, 2.0, 3.0])
+    out = utils.roll_mean(s, window=2)
+    # rolling(...).mean().shift(1) => first is NaN, then prior means
+    assert pd.isna(out.iloc[0])
+    assert out.iloc[1] == 1.0
+    assert out.iloc[2] == 1.5
+
+
+# Does the roll_sum function shift and use min_periods_1?
+# must shift and use min_periods_1
+def test_roll_sum_shifts_and_uses_min_periods_1():
+    s = pd.Series([1, 2, 3])
+    out = utils.roll_sum(s, window=2)
+    assert pd.isna(out.iloc[0])
+    assert out.iloc[1] == 1
+    assert out.iloc[2] == 3
+
+
+# Does the time_decay_weight function use the reference date and half life and returns the expected weights?
+# must use the reference date and half life and returns the expected weights
+def test_time_decay_weight_uses_reference_date_and_half_life_and_returns_expected_weights():
+    df = pd.DataFrame({"d": ["2025-01-01", "2024-01-01"]})
+    out = utils.time_decay_weight(
+        df,
+        date_col="d",
+        half_life_years=1.0,
+        reference_date=pd.Timestamp("2025-01-01"),
+    )
+    assert len(out) == 2
+    assert float(out.iloc[0]) == 1.0
+    # Our implementation uses days/365.25, so a leap year won't be exactly 1.0 year.
+    age_years = (pd.Timestamp("2025-01-01") - pd.Timestamp("2024-01-01")).days / 365.25
+    expected = 0.5 ** (age_years / 1.0)
+    assert float(out.iloc[1]) == pytest.approx(expected)
+
+
+# Does the time_decay_weight function raise a ValueError when the dates are unparseable?
+# must raise a ValueError when the dates are unparseable
+def test_time_decay_weight_raises_value_error_on_unparseable_dates():
+    df = pd.DataFrame({"d": ["not-a-date", "2025-01-01"]})
+    with pytest.raises(ValueError, match="invalid d values"):
+        utils.time_decay_weight(df, date_col="d")
+
 

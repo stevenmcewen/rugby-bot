@@ -417,9 +417,10 @@ class SqlClient:
                 result = conn.execute(
                     sa.text(
                         """
-                        SELECT source_provider, source_type, target_table, pipeline_name
+                        SELECT source_provider, source_type, target_table, pipeline_name, execution_order, source_table
                         FROM dbo.preprocessing_source_target_mappings
-                        WHERE source_provider = :source_provider AND source_type = :source_type;
+                        WHERE source_provider = :source_provider AND source_type = :source_type
+                        ORDER BY execution_order, pipeline_name;
                         """
                     ),
                     {
@@ -435,6 +436,8 @@ class SqlClient:
                         "source_type": row[1],
                         "target_table": row[2],
                         "pipeline_name": row[3],
+                        "execution_order": row[4],
+                        "source_table": row[5],
                     }
                     source_target_mappings.append(source_target_mapping)
                 return source_target_mappings
@@ -464,8 +467,10 @@ class SqlClient:
                             integration_provider,
                             container_name,
                             blob_path,
+                            source_table,
                             target_table,
                             pipeline_name,
+                            execution_order,
                             status,
                             error_message
                         )
@@ -477,8 +482,10 @@ class SqlClient:
                             :integration_provider,
                             :container_name,
                             :blob_path,
+                            :source_table,
                             :target_table,
                             :pipeline_name,
+                            :execution_order,
                             :status,
                             :error_message
                         );
@@ -491,8 +498,10 @@ class SqlClient:
                         "integration_provider": preprocessing_plan.integration_provider,
                         "container_name": preprocessing_plan.container_name,
                         "blob_path": preprocessing_plan.blob_path,
+                        "source_table": preprocessing_plan.source_table,
                         "target_table": preprocessing_plan.target_table,
                         "pipeline_name": preprocessing_plan.pipeline_name,
+                        "execution_order": preprocessing_plan.execution_order,
                         "status": "started",
                         "error_message": None,
                     },
@@ -508,8 +517,10 @@ class SqlClient:
                     "integration_provider": preprocessing_plan.integration_provider,
                     "container_name": preprocessing_plan.container_name,
                     "blob_path": preprocessing_plan.blob_path,
+                    "source_table": preprocessing_plan.source_table,
                     "target_table": preprocessing_plan.target_table,
                     "pipeline_name": preprocessing_plan.pipeline_name,
+                    "execution_order": preprocessing_plan.execution_order,
                     "status": "started",
                     "error_message": None,
                 }
@@ -562,17 +573,30 @@ class SqlClient:
     def get_preprocessing_events_by_batch_id(
         self,
         batch_id: UUID,
-    ) -> list[dict]:
+    ) -> list[PreprocessingEvent]:
         """
         Get the preprocessing_events for a given batch id.
-        Return the preprocessing_events as a list of dictionaries.
+        Return the preprocessing_events as a list of PreprocessingEvent objects.
         """
         try:
             with self.engine.connect() as conn:
                 result = conn.execute(
                     sa.text(
                         """
-                        SELECT id, batch_id, system_event_id, integration_type, integration_provider, container_name, blob_path, target_table, pipeline_name, status, error_message
+                        SELECT
+                            id,
+                            batch_id,
+                            system_event_id,
+                            integration_type,
+                            integration_provider,
+                            container_name,
+                            blob_path,
+                            source_table,
+                            target_table,
+                            pipeline_name,
+                            execution_order,
+                            status,
+                            error_message
                         FROM dbo.preprocessing_events
                         WHERE batch_id = :batch_id;
                         """
@@ -775,6 +799,79 @@ class SqlClient:
             )
         except Exception as e:
             logger.error("Error writing DataFrame to table %s: %s", table_name, e)
+            raise
+
+    ## generic data read / maintenance helpers ###
+    def read_table_to_dataframe(
+        self,
+        *,
+        table_name: str,
+        columns: list[str] | None = None,
+        where_sql: str | None = None,
+        params: dict[str, object] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Read a SQL table (optionally filtered) into a pandas DataFrame.
+
+        Args:
+            table_name: Fully-qualified table name (e.g. "dbo.InternationalMatchResults").
+            columns: Optional list of column names to select. Defaults to "*".
+            where_sql: Optional SQL snippet appended after WHERE (do not include 'WHERE').
+            params: Optional parameters for where_sql (SQLAlchemy / pandas params).
+        """
+        if not table_name:
+            raise ValueError("read_table_to_dataframe requires a non-empty table_name")
+
+        # tables will default to dbo schema if no schema is provided
+        schema = "dbo"
+        table = table_name
+
+        # If someome provides a schema in the table name we will use it, otherwise we will use the default schema of dbo
+        if "." in table_name:
+            schema, table = table_name.split(".", 1)
+        # if columns are provided we will use them, otherwise we will use all columns
+        select_cols = "*"
+        if columns:
+            select_cols = ", ".join(columns)
+        # build the query
+        query = f"SELECT {select_cols} FROM {schema}.{table}"
+        # if where clause is provided we will add it to the query
+        if where_sql:
+            query += f" WHERE {where_sql}"
+        # execute the query and return the result
+        try:
+            with self.engine.connect() as conn:
+                # SQLAlchemy Connection.execute takes bound parameters as the *second positional*
+                # argument (it does not accept a `params=` keyword argument).
+                result = conn.execute(sa.text(query), params or {})
+                rows = result.fetchall()
+                return pd.DataFrame(rows, columns=result.keys())
+        except Exception as e:
+            logger.error("Error reading table %s into DataFrame: %s", table_name, e)
+            raise
+
+    def truncate_table(self, *, table_name: str) -> None:
+        """
+        Truncate a target table.
+        """
+        if not table_name:
+            raise ValueError("truncate_table requires a non-empty table_name")
+        # tables will default to dbo schema if no schema is provided
+        schema = "dbo"
+        table = table_name
+        # If someome provides a schema in the table name we will use it, otherwise we will use the default schema of dbo
+        if "." in table_name:
+            schema, table = table_name.split(".", 1)
+        # build the query
+        query = f"TRUNCATE TABLE {schema}.{table}"
+        # execute the query and return the result
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(sa.text(query))
+                conn.commit()
+                logger.info("Truncated table %s", table_name)
+        except Exception as e:
+            logger.error("Error truncating table %s: %s", table_name, e)
             raise
 
     ## venue database helpers ###

@@ -18,6 +18,9 @@ class DummyPreprocessingEvent:
         integration_provider: str = "kaggle",
         integration_type: str = "historical_results",
         target_table: str = "dbo.InternationalMatchResults",
+        source_table: str | None = None,
+        batch_id=None,
+        system_event_id=None,
     ):
         self.id = uuid4()
         self.container_name = container_name
@@ -25,6 +28,10 @@ class DummyPreprocessingEvent:
         self.integration_provider = integration_provider
         self.integration_type = integration_type
         self.target_table = target_table
+        self.source_table = source_table
+        # Only needed for stage-2 SQL reads when the source table supports filtering.
+        self.batch_id = batch_id or uuid4()
+        self.system_event_id = system_event_id or uuid4()
 
 # Does the validate_source_data function raise a ValueError if the source data is empty?
 def test_validate_source_data_empty_raises():
@@ -89,6 +96,22 @@ def test_get_target_schema_builds_expected_dict():
     assert schema["data_types"]["c"] == "date"
     assert schema["required"]["c"] is True
 
+
+def test_get_source_schema_uses_source_table_when_provided():
+    event = DummyPreprocessingEvent(source_table="dbo.Source")
+
+    class FakeSqlClient:
+        def get_schema(self, **kwargs):
+            assert kwargs["table_name"] == "dbo.Source"
+            return [
+                {"column_name": "x", "data_type": "int", "is_required": 1},
+            ]
+
+    schema = helpers.get_source_schema(event, FakeSqlClient())
+    assert schema["columns"] == ["x"]
+    assert schema["data_types"]["x"] == "int"
+    assert schema["required"]["x"] is True
+
 # Does the get_source_data function download the blob and read the csv?
 def test_get_source_data_downloads_blob_and_reads_csv(monkeypatch):
     event = DummyPreprocessingEvent(container_name="raw", blob_path="x.csv")
@@ -125,6 +148,38 @@ def test_get_source_data_downloads_blob_and_reads_csv(monkeypatch):
     assert list(df.columns) == ["col1", "col2"]
     assert df.shape == (2, 2)
 
+
+def test_get_source_data_reads_from_sql_when_source_table_provided():
+    batch_id = uuid4()
+    system_event_id = uuid4()
+    event = DummyPreprocessingEvent(
+        source_table="dbo.Source",
+        batch_id=batch_id,
+        system_event_id=system_event_id,
+    )
+
+    expected_df = pd.DataFrame([{"a": 1}])
+
+    class FakeSqlClient:
+        def get_schema(self, **kwargs):
+            assert kwargs["table_name"] == "dbo.Source"
+            # Provide filters so helper will build WHERE + params
+            return [
+                {"column_name": "batch_id", "data_type": "uniqueidentifier", "is_required": 0},
+                {"column_name": "system_event_id", "data_type": "uniqueidentifier", "is_required": 0},
+                {"column_name": "a", "data_type": "int", "is_required": 0},
+            ]
+
+        def read_table_to_dataframe(self, *, table_name, where_sql=None, params=None, columns=None):
+            assert table_name == "dbo.Source"
+            assert columns is None
+            assert where_sql == "batch_id = :batch_id AND system_event_id = :system_event_id"
+            assert params == {"batch_id": str(batch_id), "system_event_id": str(system_event_id)}
+            return expected_df
+
+    out = helpers.get_source_data(event, sql_client=FakeSqlClient())
+    assert out.equals(expected_df)
+
 # Does the write_data_to_target_table function delegate to the sql client?
 def test_write_data_to_target_table_delegates_to_sql_client():
     event = DummyPreprocessingEvent(target_table="dbo.Target")
@@ -143,6 +198,21 @@ def test_write_data_to_target_table_delegates_to_sql_client():
     helpers.write_data_to_target_table(df, event, sql)
     assert sql.called_with["df"].equals(df)
     assert sql.called_with["table_name"] == "dbo.Target"
+
+
+def test_truncate_target_table_delegates_to_sql_client():
+    event = DummyPreprocessingEvent(target_table="dbo.Target")
+
+    class FakeSqlClient:
+        def __init__(self):
+            self.called_with = None
+
+        def truncate_table(self, *, table_name: str):
+            self.called_with = table_name
+
+    sql = FakeSqlClient()
+    helpers.truncate_target_table(event, sql)
+    assert sql.called_with == "dbo.Target"
 
 # Does the add_kickoff_datetime_from_date_and_time function combine the date and time correctly?
 def test_add_kickoff_datetime_from_date_and_time_combines_correctly():
@@ -373,4 +443,258 @@ def test_transform_rugby365_fixtures_data_to_international_fixtures_builds_kicko
     assert pd.to_datetime(out.loc[0, "KickoffTimeLocal"]) == pd.Timestamp("2025-12-08 04:05:00")
     assert bool(out.loc[0, "WorldCup"]) is True
 
+
+# Does the transform_international_results_to_model_ready_data function build the model ready data correctly?
+# must build the model ready data correctly
+def test_transform_international_results_to_model_ready_data_builds_model_ready_data():
+    """
+    Stage-2 transform builds leakage-safe pre-match features + targets.
+    This test locks in the contract that it adds tier features and drops scores.
+    """
+    event = DummyPreprocessingEvent(
+        integration_provider="kaggle",
+        integration_type="historical_results",
+        source_table="dbo.InternationalMatchResults",
+        target_table="dbo.InternationalMatchResultsModelData",
+    )
+    source = pd.DataFrame(
+        [
+            {
+                "ID": 1,
+                "MatchDate": "2025-12-08",
+                "HomeTeam": "FRANCE",
+                "AwayTeam": "WALES",
+                "HomeScore": 10,
+                "AwayScore": 7,
+                "CompetitionName": "SIX NATIONS",
+                "Venue": "STADE DE FRANCE",
+                "City": "PARIS",
+                "Country": "FRANCE",
+                "Neutral": False,
+                "WorldCup": False,
+            }
+        ]
+    )
+
+    class FakeSqlClient:
+        def read_table_to_dataframe(self, *, table_name: str, columns=None, where_sql=None, params=None):
+            if table_name == "dbo.InternationalRugbyTeams":
+                # Used both for TeamNameStandardization and add_international_features
+                return pd.DataFrame(
+                    [
+                        {"TeamName": "FRANCE", "Tier": 1, "Hemisphere": "NH"},
+                        {"TeamName": "WALES", "Tier": 1, "Hemisphere": "NH"},
+                    ]
+                )
+            if table_name == "dbo.RugbyVenues":
+                return pd.DataFrame([{"VenueName": "STADE DE FRANCE"}])
+            raise AssertionError(f"Unexpected table read: {table_name}")
+
+    out = helpers.transform_international_results_to_model_ready_data(
+        source,
+        event,
+        sql_client=FakeSqlClient(),
+    )
+
+    assert isinstance(out, pd.DataFrame)
+    assert len(out) == 1
+
+    # Scores should be dropped (no leakage)
+    assert "HomeScore" not in out.columns
+    assert "AwayScore" not in out.columns
+
+    # Tier features should exist
+    assert out.loc[0, "Home_Tier"] == 1
+    assert out.loc[0, "Away_Tier"] == 1
+    assert out.loc[0, "Diff_Tier"] == 0
+
+    # Hemisphere is optional; if present it should be added
+    assert out.loc[0, "Home_Hemisphere"] == "NH"
+    assert out.loc[0, "Away_Hemisphere"] == "NH"
+
+    # Targets should exist
+    assert out.loc[0, "PointDiff"] == 3
+    assert out.loc[0, "HomeWin"] == 1
+
+    # Weight should be computed (with single row -> 1.0)
+    assert float(out.loc[0, "TimeDecayWeight"]) == 1.0
+
+
+# Does the team_name_standardization function filter to canonical teams only?
+# must filter to canonical teams only
+def test_team_name_standardization_filters_to_canonical_teams_only():
+    matches = pd.DataFrame(
+        [
+            {"ID": 1, "HomeTeam": "France", "AwayTeam": "Wales", "Venue": "X"},
+            {"ID": 2, "HomeTeam": "France", "AwayTeam": "Italy", "Venue": "X"},
+            {"ID": 3, "HomeTeam": None, "AwayTeam": "Wales", "Venue": "X"},
+        ]
+    )
+
+    class FakeSqlClient:
+        def read_table_to_dataframe(self, *, table_name: str, columns=None, where_sql=None, params=None):
+            assert table_name == "dbo.InternationalRugbyTeams"
+            assert columns == ["TeamName"]
+            return pd.DataFrame([{"TeamName": "FRANCE"}, {"TeamName": "WALES"}])
+
+    out = helpers.team_name_standardization(matches, FakeSqlClient())
+    assert out["ID"].tolist() == [1]
+
+
+# Does the venue_standardisation function filter to canonical venues only?
+# must filter to canonical venues only
+def test_venue_standardisation_filters_to_canonical_venues_only_case_insensitive():
+    matches = pd.DataFrame(
+        [
+            {"ID": 1, "Venue": " Stade de France "},
+            {"ID": 2, "Venue": "Unknown Venue"},
+            {"ID": 3, "Venue": None},
+        ]
+    )
+
+    class FakeSqlClient:
+        def read_table_to_dataframe(self, *, table_name: str, columns=None, where_sql=None, params=None):
+            assert table_name == "dbo.RugbyVenues"
+            assert columns == ["VenueName"]
+            return pd.DataFrame([{"VenueName": "STADE DE FRANCE"}])
+
+    out = helpers.venue_standardisation(matches, FakeSqlClient(), table_name="dbo.RugbyVenues", venue_col="Venue")
+    assert out["ID"].tolist() == [1]
+
+
+# Does the add_match_targets function compute the point difference, home win and drop draws by default?
+# must compute the point difference, home win and drop draws by default
+def test_add_match_targets_computes_point_diff_and_home_win_and_drops_draws_by_default():
+    df = pd.DataFrame(
+        [
+            {"HomeScore": 10, "AwayScore": 7},   # home win
+            {"HomeScore": 12, "AwayScore": 12},  # draw
+            {"HomeScore": 5, "AwayScore": 9},    # home loss
+        ]
+    )
+    out = helpers.add_match_targets(df, drop_draws=True)
+    assert out["PointDiff"].tolist() == [3, -4]
+    assert out["HomeWin"].tolist() == [1, 0]
+
+
+# Does the to_team_match_long_format function create two rows per match and correct perspectives?
+# must create two rows per match and correct perspectives
+def test_to_team_match_long_format_creates_two_rows_per_match_and_correct_perspectives():
+    matches = pd.DataFrame(
+        [
+            {
+                "ID": 1,
+                "MatchDate": "2025-12-08",
+                "HomeTeam": "FRANCE",
+                "AwayTeam": "WALES",
+                "HomeScore": 10,
+                "AwayScore": 7,
+                "CompetitionName": "SIX NATIONS",
+            }
+        ]
+    )
+    long_df = helpers.to_team_match_long_format(
+        matches,
+        id_col="ID",
+        date_col="MatchDate",
+        home_team_col="HomeTeam",
+        away_team_col="AwayTeam",
+        home_score_col="HomeScore",
+        away_score_col="AwayScore",
+        extra_context_cols=("CompetitionName", "MissingCol"),
+    )
+
+    assert len(long_df) == 2
+    # Home perspective row
+    home_row = long_df[long_df["IsHome"] == 1].iloc[0]
+    assert home_row["Team"] == "FRANCE"
+    assert home_row["Opponent"] == "WALES"
+    assert home_row["PointsFor"] == 10
+    assert home_row["PointsAgainst"] == 7
+    assert home_row["Win"] == 1
+    # Away perspective row
+    away_row = long_df[long_df["IsHome"] == 0].iloc[0]
+    assert away_row["Team"] == "WALES"
+    assert away_row["Opponent"] == "FRANCE"
+    assert away_row["PointsFor"] == 7
+    assert away_row["PointsAgainst"] == 10
+    assert away_row["Loss"] == 1
+    # Context column preserved when present
+    assert "CompetitionName" in long_df.columns
+
+
+# Does the compute_rolling_team_form function shift so the current match is not included?
+# must shift so the current match is not included
+def test_compute_rolling_team_form_shifts_so_current_match_not_included():
+    team_long = pd.DataFrame(
+        [
+            # Same team, two matches in order
+            {"ID": 1, "MatchDate": "2025-01-01", "Team": "A", "Win": 1, "Draw": 0, "Loss": 0, "PointsFor": 10, "PointsAgainst": 5, "PointDiff": 5},
+            {"ID": 2, "MatchDate": "2025-02-01", "Team": "A", "Win": 0, "Draw": 0, "Loss": 1, "PointsFor": 7, "PointsAgainst": 12, "PointDiff": -5},
+        ]
+    )
+    out = helpers.compute_rolling_team_form(team_long, form_window=10, date_col="MatchDate")
+
+    # First match has no prior history
+    assert pd.isna(out.loc[0, "FormWinRate"])
+    assert pd.isna(out.loc[0, "FormPointsFor"])
+    assert pd.isna(out.loc[0, "FormGames"])
+
+    # Second match sees only the first match
+    assert out.loc[1, "FormWinRate"] == 1.0
+    assert out.loc[1, "FormPointsFor"] == 10.0
+    assert int(out.loc[1, "FormGames"]) == 1
+    assert str(out["FormGames"].dtype) == "Int64"
+
+
+# Does the attach_rolling_team_form_to_matches function join home and away and build diffs?
+# must join home and away and build diffs
+def test_attach_rolling_team_form_to_matches_joins_home_away_and_builds_diffs():
+    results_df = pd.DataFrame([{"ID": 1, "HomeTeam": "A", "AwayTeam": "B"}])
+    team_form_long = pd.DataFrame(
+        [
+            {"ID": 1, "Team": "A", "IsHome": 1, "FormWinRate": 0.6, "FormDrawRate": 0.1, "FormPointsFor": 20.0, "FormPointsAgainst": 18.0, "FormPointDiff": 2.0, "FormGames": 5},
+            {"ID": 1, "Team": "B", "IsHome": 0, "FormWinRate": 0.4, "FormDrawRate": 0.2, "FormPointsFor": 15.0, "FormPointsAgainst": 19.0, "FormPointDiff": -4.0, "FormGames": 5},
+        ]
+    )
+    out = helpers.attach_rolling_team_form_to_matches(results_df, team_form_long)
+    assert out.loc[0, "Home_FormWinRate"] == 0.6
+    assert out.loc[0, "Away_FormWinRate"] == 0.4
+    # Avoid brittle binary-float equality
+    assert float(out.loc[0, "Diff_FormWinRate"]) == pytest.approx(0.2)
+    assert out.loc[0, "Diff_FormPointDiff"] == 6.0
+
+
+# Does the add_international_features function map tier and hemisphere and is non-destructive?
+# must map tier and hemisphere and is non-destructive
+def test_add_international_features_maps_tier_and_hemisphere_and_is_non_destructive():
+    df = pd.DataFrame(
+        [
+            {"HomeTeam": "FRANCE", "AwayTeam": "WALES"},
+            {"HomeTeam": "FRANCE", "AwayTeam": "UNKNOWN"},
+        ]
+    )
+
+    class FakeSqlClient:
+        def read_table_to_dataframe(self, *, table_name: str, columns=None, where_sql=None, params=None):
+            assert table_name == "dbo.InternationalRugbyTeams"
+            assert columns == ["TeamName", "Tier", "Hemisphere"]
+            return pd.DataFrame(
+                [
+                    {"TeamName": "FRANCE", "Tier": 1, "Hemisphere": "NH"},
+                    {"TeamName": "WALES", "Tier": 2, "Hemisphere": "NH"},
+                ]
+            )
+
+    out = helpers.add_international_features(df, FakeSqlClient())
+    assert len(out) == 2
+    assert out.loc[0, "Home_Tier"] == 1
+    assert out.loc[0, "Away_Tier"] == 2
+    assert out.loc[0, "Diff_Tier"] == -1
+    assert out.loc[0, "Home_Hemisphere"] == "NH"
+    assert out.loc[0, "Away_Hemisphere"] == "NH"
+
+    # Unknown team yields nullable tiers, but row is retained
+    assert out.loc[1, "Home_Tier"] == 1
+    assert pd.isna(out.loc[1, "Away_Tier"])
 
