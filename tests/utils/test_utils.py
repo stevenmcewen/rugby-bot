@@ -2,6 +2,7 @@ from datetime import date
 
 import pandas as pd
 import pytest
+from decimal import Decimal
 
 from functions.utils import utils
 
@@ -159,5 +160,51 @@ def test_time_decay_weight_raises_value_error_on_unparseable_dates():
     df = pd.DataFrame({"d": ["not-a-date", "2025-01-01"]})
     with pytest.raises(ValueError, match="invalid d values"):
         utils.time_decay_weight(df, date_col="d")
+
+
+def test_stable_schema_hash_order_insensitive_and_stable():
+    h1 = utils.stable_schema_hash(["b", "a"])
+    h2 = utils.stable_schema_hash(["a", "b"])
+    assert h1 == h2
+    assert isinstance(h1, str)
+    assert len(h1) == 64  # sha256 hex
+
+
+def test_stable_schema_hash_empty_raises_value_error():
+    with pytest.raises(ValueError):
+        utils.stable_schema_hash([])
+
+
+def test_uct_now_iso_returns_isoformat_with_timezone():
+    s = utils.uct_now_iso()
+    dt = pd.Timestamp(s)
+    assert dt.tzinfo is not None
+
+
+def test_normalize_dataframe_dtypes_converts_decimal_objects_to_float():
+    df = pd.DataFrame({"x": [Decimal("1.5"), Decimal("2.0"), None]})
+    out = utils.normalize_dataframe_dtypes(df)
+    assert str(out["x"].dtype) == "Float64"
+    assert float(out["x"].iloc[0]) == 1.5
+
+
+def test_normalize_dataframe_dtypes_parses_numeric_strings_when_mostly_numeric():
+    df = pd.DataFrame({"x": ["1", "2", "3", ""]})
+    out = utils.normalize_dataframe_dtypes(df, numeric_parse_threshold=0.7)
+    assert str(out["x"].dtype) == "Float64"
+    assert float(out["x"].iloc[0]) == 1.0
+
+
+def test_normalize_dataframe_dtypes_coerces_low_cardinality_strings_to_category():
+    df = pd.DataFrame({"x": ["A", "A", "B", "B", "A"]})
+    out = utils.normalize_dataframe_dtypes(df, numeric_parse_threshold=0.95, max_categories=10)
+    assert str(out["x"].dtype) == "category"
+
+
+def test_normalize_dataframe_dtypes_keeps_high_cardinality_strings_as_string_dtype():
+    df = pd.DataFrame({"x": [f"v{i}" for i in range(100)]})
+    out = utils.normalize_dataframe_dtypes(df, max_categories=10)
+    # pandas "string" dtype prints as 'string' or 'string[python]' depending on version
+    assert "string" in str(out["x"].dtype)
 
 

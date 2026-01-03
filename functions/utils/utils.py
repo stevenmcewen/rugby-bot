@@ -228,6 +228,7 @@ def normalize_dataframe_dtypes(
         out[col] = s_str
 
     return out
+    
 def roll_mean(series: pd.Series, window: int) -> pd.Series:
     """
     Compute the rolling mean of a pandas Series.
