@@ -123,8 +123,8 @@ def test_build_preprocessing_plans_step_creates_plans_for_each_mapping():
             assert source_provider == "kaggle"
             assert source_type == "results"
             return [
-                {"target_table": "dbo.T1", "pipeline_name": "p1"},
-                {"target_table": "dbo.T2", "pipeline_name": "p2"},
+                {"target_table": "dbo.T1", "pipeline_name": "p1", "source_table": None, "execution_order": 1},
+                {"target_table": "dbo.T2", "pipeline_name": "p2", "source_table": "dbo.T1", "execution_order": 2},
             ]
 
     ctx: services.PreprocessingContext = {
@@ -137,6 +137,7 @@ def test_build_preprocessing_plans_step_creates_plans_for_each_mapping():
     assert len(plans) == 2
     assert {p.target_table for p in plans} == {"dbo.T1", "dbo.T2"}
     assert {p.pipeline_name for p in plans} == {"p1", "p2"}
+    assert [p.execution_order for p in plans] == [1, 2]
 
 # Does the persist_preprocessing_events_step function create the preprocessing events?
 def test_persist_preprocessing_events_step_creates_preprocessing_events():
@@ -149,6 +150,8 @@ def test_persist_preprocessing_events_step_creates_preprocessing_events():
         blob_path="a.csv",
         target_table="dbo.T1",
         pipeline_name="p1",
+        source_table=None,
+        execution_order=1,
     )
 
     created_id = uuid4()
@@ -164,8 +167,10 @@ def test_persist_preprocessing_events_step_creates_preprocessing_events():
                 "integration_provider": plan.integration_provider,
                 "container_name": plan.container_name,
                 "blob_path": plan.blob_path,
+                "source_table": plan.source_table,
                 "target_table": plan.target_table,
                 "pipeline_name": plan.pipeline_name,
+                "execution_order": plan.execution_order,
                 "status": "started",
                 "error_message": None,
             }
@@ -177,6 +182,7 @@ def test_persist_preprocessing_events_step_creates_preprocessing_events():
     assert len(events) == 1
     assert events[0].id == created_id
     assert events[0].pipeline_name == "p1"
+    assert events[0].execution_order == 1
 
 # Does the run_preprocessing_pipelines_step function update the events and ingestion event status?
 def test_run_preprocessing_pipelines_step_updates_events_and_ingestion_event_status(monkeypatch):
@@ -199,9 +205,11 @@ def test_run_preprocessing_pipelines_step_updates_events_and_ingestion_event_sta
         integration_provider=ingestion_source.integration_provider,
         container_name=ingestion_source.container_name,
         blob_path=ingestion_source.blob_path,
+        source_table=None,
         target_table="dbo.T1",
         pipeline_name="p1",
         status="started",
+        execution_order=1,
         error_message=None,
     )
     ev2 = services.PreprocessingEvent(
@@ -212,9 +220,11 @@ def test_run_preprocessing_pipelines_step_updates_events_and_ingestion_event_sta
         integration_provider=ingestion_source.integration_provider,
         container_name=ingestion_source.container_name,
         blob_path=ingestion_source.blob_path,
+        source_table="dbo.T1",
         target_table="dbo.T2",
         pipeline_name="p2",
         status="started",
+        execution_order=2,
         error_message=None,
     )
 
@@ -271,9 +281,11 @@ def test_run_preprocessing_pipelines_step_sets_ingestion_failed_when_any_preproc
         integration_provider=ingestion_source.integration_provider,
         container_name=ingestion_source.container_name,
         blob_path=ingestion_source.blob_path,
+        source_table=None,
         target_table="dbo.T1",
         pipeline_name="p1",
         status="started",
+        execution_order=1,
         error_message=None,
     )
 

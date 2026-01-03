@@ -9,9 +9,11 @@ from azure.identity import DefaultAzureCredential
 import pyodbc
 import struct 
 import pandas as pd
+import json
 
 from functions.config.settings import AppSettings
 from functions.logging.logger import get_logger
+from functions.utils.utils import normalize_dataframe_dtypes
 
 logger = get_logger(__name__)
 
@@ -415,9 +417,10 @@ class SqlClient:
                 result = conn.execute(
                     sa.text(
                         """
-                        SELECT source_provider, source_type, target_table, pipeline_name
+                        SELECT source_provider, source_type, target_table, pipeline_name, execution_order, source_table
                         FROM dbo.preprocessing_source_target_mappings
-                        WHERE source_provider = :source_provider AND source_type = :source_type;
+                        WHERE source_provider = :source_provider AND source_type = :source_type
+                        ORDER BY execution_order, pipeline_name;
                         """
                     ),
                     {
@@ -433,6 +436,8 @@ class SqlClient:
                         "source_type": row[1],
                         "target_table": row[2],
                         "pipeline_name": row[3],
+                        "execution_order": row[4],
+                        "source_table": row[5],
                     }
                     source_target_mappings.append(source_target_mapping)
                 return source_target_mappings
@@ -462,8 +467,10 @@ class SqlClient:
                             integration_provider,
                             container_name,
                             blob_path,
+                            source_table,
                             target_table,
                             pipeline_name,
+                            execution_order,
                             status,
                             error_message
                         )
@@ -475,8 +482,10 @@ class SqlClient:
                             :integration_provider,
                             :container_name,
                             :blob_path,
+                            :source_table,
                             :target_table,
                             :pipeline_name,
+                            :execution_order,
                             :status,
                             :error_message
                         );
@@ -489,8 +498,10 @@ class SqlClient:
                         "integration_provider": preprocessing_plan.integration_provider,
                         "container_name": preprocessing_plan.container_name,
                         "blob_path": preprocessing_plan.blob_path,
+                        "source_table": preprocessing_plan.source_table,
                         "target_table": preprocessing_plan.target_table,
                         "pipeline_name": preprocessing_plan.pipeline_name,
+                        "execution_order": preprocessing_plan.execution_order,
                         "status": "started",
                         "error_message": None,
                     },
@@ -506,8 +517,10 @@ class SqlClient:
                     "integration_provider": preprocessing_plan.integration_provider,
                     "container_name": preprocessing_plan.container_name,
                     "blob_path": preprocessing_plan.blob_path,
+                    "source_table": preprocessing_plan.source_table,
                     "target_table": preprocessing_plan.target_table,
                     "pipeline_name": preprocessing_plan.pipeline_name,
+                    "execution_order": preprocessing_plan.execution_order,
                     "status": "started",
                     "error_message": None,
                 }
@@ -560,17 +573,30 @@ class SqlClient:
     def get_preprocessing_events_by_batch_id(
         self,
         batch_id: UUID,
-    ) -> list[dict]:
+    ) -> list[PreprocessingEvent]:
         """
         Get the preprocessing_events for a given batch id.
-        Return the preprocessing_events as a list of dictionaries.
+        Return the preprocessing_events as a list of PreprocessingEvent objects.
         """
         try:
             with self.engine.connect() as conn:
                 result = conn.execute(
                     sa.text(
                         """
-                        SELECT id, batch_id, system_event_id, integration_type, integration_provider, container_name, blob_path, target_table, pipeline_name, status, error_message
+                        SELECT
+                            id,
+                            batch_id,
+                            system_event_id,
+                            integration_type,
+                            integration_provider,
+                            container_name,
+                            blob_path,
+                            source_table,
+                            target_table,
+                            pipeline_name,
+                            execution_order,
+                            status,
+                            error_message
                         FROM dbo.preprocessing_events
                         WHERE batch_id = :batch_id;
                         """
@@ -775,6 +801,79 @@ class SqlClient:
             logger.error("Error writing DataFrame to table %s: %s", table_name, e)
             raise
 
+    ## generic data read / maintenance helpers ###
+    def read_table_to_dataframe(
+        self,
+        *,
+        table_name: str,
+        columns: list[str] | None = None,
+        where_sql: str | None = None,
+        params: dict[str, object] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Read a SQL table (optionally filtered) into a pandas DataFrame.
+
+        Args:
+            table_name: Fully-qualified table name (e.g. "dbo.InternationalMatchResults").
+            columns: Optional list of column names to select. Defaults to "*".
+            where_sql: Optional SQL snippet appended after WHERE (do not include 'WHERE').
+            params: Optional parameters for where_sql (SQLAlchemy / pandas params).
+        """
+        if not table_name:
+            raise ValueError("read_table_to_dataframe requires a non-empty table_name")
+
+        # tables will default to dbo schema if no schema is provided
+        schema = "dbo"
+        table = table_name
+
+        # If someome provides a schema in the table name we will use it, otherwise we will use the default schema of dbo
+        if "." in table_name:
+            schema, table = table_name.split(".", 1)
+        # if columns are provided we will use them, otherwise we will use all columns
+        select_cols = "*"
+        if columns:
+            select_cols = ", ".join(columns)
+        # build the query
+        query = f"SELECT {select_cols} FROM {schema}.{table}"
+        # if where clause is provided we will add it to the query
+        if where_sql:
+            query += f" WHERE {where_sql}"
+        # execute the query and return the result
+        try:
+            with self.engine.connect() as conn:
+                # SQLAlchemy Connection.execute takes bound parameters as the *second positional*
+                # argument (it does not accept a `params=` keyword argument).
+                result = conn.execute(sa.text(query), params or {})
+                rows = result.fetchall()
+                return pd.DataFrame(rows, columns=result.keys())
+        except Exception as e:
+            logger.error("Error reading table %s into DataFrame: %s", table_name, e)
+            raise
+
+    def truncate_table(self, *, table_name: str) -> None:
+        """
+        Truncate a target table.
+        """
+        if not table_name:
+            raise ValueError("truncate_table requires a non-empty table_name")
+        # tables will default to dbo schema if no schema is provided
+        schema = "dbo"
+        table = table_name
+        # If someome provides a schema in the table name we will use it, otherwise we will use the default schema of dbo
+        if "." in table_name:
+            schema, table = table_name.split(".", 1)
+        # build the query
+        query = f"TRUNCATE TABLE {schema}.{table}"
+        # execute the query and return the result
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(sa.text(query))
+                conn.commit()
+                logger.info("Truncated table %s", table_name)
+        except Exception as e:
+            logger.error("Error truncating table %s: %s", table_name, e)
+            raise
+
     ## venue database helpers ###
     def get_venue_database(self) -> pd.DataFrame:
         """
@@ -814,3 +913,298 @@ class SqlClient:
         except Exception as e:
             logger.error("Error loading venue database from dbo.RugbyVenues: %s", e)
             raise
+
+    ## model helpers ###
+    def get_model_specs_by_model_group_key(self, model_group_key: str) -> dict:
+        """
+        Get the full model specification bundle for a given model_group_key.
+
+        Returns a dict containing:
+        - group: shared config (dataset sources, enabled flag)
+        - models: list of models in the group (each with trainer + target)
+        - columns: columns by role (entity/feature/target + optional weight)
+        """
+        try:
+            with self.engine.connect() as conn:
+                # 1) Model group
+                group_result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            ModelGroupKey,
+                            TrainingDatasetSource,
+                            ScoringDatasetSource,
+                            IsEnabled
+                        FROM dbo.ModelGroup
+                        WHERE ModelGroupKey = :model_group_key;
+                        """
+                    ),
+                    {"model_group_key": model_group_key},
+                )
+                group_row = group_result.fetchone()
+                if group_row is None:
+                    raise ValueError(f"No ModelGroup found for model_group_key={model_group_key!r}")
+
+                group_spec = {
+                    "model_group_key": group_row[0],
+                    "training_dataset_source": group_row[1],
+                    "scoring_dataset_source": group_row[2],
+                    "is_enabled": bool(group_row[3]),
+                }
+
+                if not group_spec["is_enabled"]:
+                    raise ValueError(f"ModelGroup {model_group_key!r} is disabled")
+
+                # 2) Models in group
+                models_result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            ModelKey,
+                            TrainerKey,
+                            TargetColumn,
+                            PredictionType,
+                            IsEnabled,
+                            SampleWeightColumn,
+                            TimeColumn,
+                            ModelParametersJson,
+                            TrainerParametersJson
+                        FROM dbo.ModelRegistry
+                        WHERE ModelGroupKey = :model_group_key
+                        ORDER BY ModelKey;
+                        """
+                    ),
+                    {"model_group_key": model_group_key},
+                )
+                model_rows = models_result.fetchall()
+                if not model_rows:
+                    raise ValueError(f"No models registered in ModelRegistry for model_group_key={model_group_key!r}")
+
+                models = []
+                for row in model_rows:
+                    # First need to make sure that the ModelParametersJson is valid JSON and can be parsed
+                    raw_model_params = row[7]
+                    raw_trainer_params = row[8]
+
+                    if raw_model_params is None or str(raw_model_params).strip() == "":
+                        model_params = {}
+
+                    else:
+                        try:
+                            model_params = json.loads(raw_model_params)
+                        except json.JSONDecodeError as e:
+                            raise ValueError(
+                                f"Invalid JSON in ModelRegistry.ModelParametersJson for ModelKey={row[0]!r}: {e}"
+                            ) from e
+                        
+                    if raw_trainer_params is None or str(raw_trainer_params).strip() == "":
+                        trainer_params = {}
+                    else:
+                        try:
+                            trainer_params = json.loads(raw_trainer_params)
+                        except json.JSONDecodeError as e:
+                            raise ValueError(
+                                f"Invalid JSON in ModelRegistry.TrainerParametersJson for ModelKey={row[0]!r}: {e}"
+                            ) from e
+                    
+                    # append the model spec
+                    models.append(
+                        {
+                            "model_key": row[0],
+                            "trainer_key": row[1],
+                            "target_column": row[2],
+                            "prediction_type": row[3],
+                            "is_enabled": bool(row[4]),
+                            "sample_weight_column": row[5],
+                            "time_column": row[6],
+                            "model_parameters": model_params,
+                            "trainer_parameters": trainer_params,
+                        }
+                    )
+
+                enabled_models = [m for m in models if m["is_enabled"]]
+                if not enabled_models:
+                    raise ValueError(f"All models in group {model_group_key!r} are disabled")
+
+                # 3) Columns by role
+                cols_result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            ColumnName,
+                            ColumnRole,
+                            IsActive,
+                            OrdinalPosition
+                        FROM dbo.ModelColumn
+                        WHERE ModelGroupKey = :model_group_key
+                        ORDER BY
+                            CASE ColumnRole
+                                WHEN 'entity' THEN 1
+                                WHEN 'feature' THEN 2
+                                WHEN 'weight' THEN 3
+                                WHEN 'target' THEN 4
+                                ELSE 99
+                            END,
+                            OrdinalPosition;
+                        """
+                    ),
+                    {"model_group_key": model_group_key},
+                )
+                col_rows = cols_result.fetchall()
+
+                columns = {
+                    "entity": [],
+                    "feature": [],
+                    "target": [],
+                    "weight": None,   # single column name if present
+                }
+
+                for row in col_rows:
+                    column_name = row[0]
+                    column_role = row[1]
+                    is_active = bool(row[2])
+
+                    if not is_active:
+                        continue
+
+                    if column_role in ("entity", "feature", "target"):
+                        columns[column_role].append(column_name)
+                    elif column_role == "weight":
+                        # allow at most one weight column
+                        if columns["weight"] is not None and columns["weight"] != column_name:
+                            raise ValueError(
+                                f"Multiple active weight columns found for {model_group_key!r}: "
+                                f"{columns['weight']!r} and {column_name!r}"
+                            )
+                        columns["weight"] = column_name
+
+                if not columns["feature"]:
+                    raise ValueError(f"No active feature columns found for model_group_key={model_group_key!r}")
+
+                spec_bundle = {
+                    **group_spec,
+                    "models": enabled_models,
+                    "columns": columns,
+                }
+                return spec_bundle
+
+        except Exception as e:
+            logger.error("Error getting model specs for model_group_key='%s': %s", model_group_key, e)
+            raise
+
+    def get_model_source_data(
+        self,
+        source_table: str,
+        columns_to_select: list[str],
+    ) -> pd.DataFrame:
+        """
+        Get the source data for a given model.
+        Return the source data as a pandas DataFrame.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(sa.text(f"SELECT {', '.join(columns_to_select)} FROM {source_table}"))
+                rows = result.fetchall()
+                df = pd.DataFrame(rows, columns=columns_to_select)
+                normalized_df = normalize_dataframe_dtypes(df)
+                return normalized_df
+        except Exception as e:
+            logger.error("Error getting model source data for source_table='%s' and columns_to_select='%s': %s", source_table, columns_to_select, e)
+            raise
+
+
+    def persist_artifact_metadata(
+        self,
+        *,
+        system_event_id: str,
+        model_key: str,
+        trainer_key: str,
+        prediction_type: str,
+        target_column: str,
+        schema_hash: str,
+        artifact_version: int,
+        blob_container: str,
+        blob_path: str,
+        metrics: dict | None,
+    ) -> tuple[str, int]:
+        """
+        Insert a ModelArtifacts row and return (artifact_id, artifact_version).
+        """
+        try:
+            metrics_json = json.dumps(metrics) if metrics is not None else None
+
+            sql = sa.text("""
+                INSERT INTO dbo.ModelArtifacts (
+                    ArtifactId,
+                    ArtifactVersion,
+                    SystemEventId,
+                    ModelKey,
+                    TrainerKey,
+                    PredictionType,
+                    TargetColumn,
+                    SchemaHash,
+                    BlobContainer,
+                    BlobPath,
+                    Metrics
+                )
+                OUTPUT inserted.ArtifactId
+                VALUES (
+                    NEWID(),
+                    :artifact_version,
+                    :system_event_id,
+                    :model_key,
+                    :trainer_key,
+                    :prediction_type,
+                    :target_column,
+                    :schema_hash,
+                    :blob_container,
+                    :blob_path,
+                    :metrics
+                );
+            """)
+
+            with self.engine.begin() as conn:
+                artifact_id = conn.execute(
+                    sql,
+                    {
+                        "artifact_version": artifact_version,
+                        "system_event_id": system_event_id,
+                        "model_key": model_key,
+                        "trainer_key": trainer_key,
+                        "prediction_type": prediction_type,
+                        "target_column": target_column,
+                        "schema_hash": schema_hash,
+                        "blob_container": blob_container,
+                        "blob_path": blob_path,
+                        "metrics": metrics_json,
+                    },
+                ).scalar_one()
+
+            return str(artifact_id), artifact_version
+
+        except Exception as e:
+            logger.error("Error persisting model artifact metadata: %s", e)
+            raise
+
+    def get_next_artifact_version(self, *, model_key: str) -> int:
+        """
+        Get the next artifact version number for a given model_key.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT ISNULL(MAX(ArtifactVersion), 0) + 1
+                        FROM dbo.ModelArtifacts
+                        WHERE ModelKey = :model_key;
+                        """
+                    ),
+                    {"model_key": model_key},
+                )
+                next_version = result.scalar()
+                return next_version
+        except Exception as e:
+            logger.error("Error getting next artifact version for model_key='%s': %s", model_key, e)
+            raise   
+
