@@ -139,7 +139,6 @@ class DownloadHistoricalDataStep:
 
 class ScrapeResultsOrFixturesStep:
     """
-    Placeholder step.
 
     Responsibility:
     - Scrape results or fixtures for a given provider (e.g. Rugby365).
@@ -151,7 +150,7 @@ class ScrapeResultsOrFixturesStep:
         provider = context["integration_provider"]
 
         logger.info(
-            "Scraping %s data for provider=%s (placeholder implementation).",
+            "Scraping %s data for provider=%s.",
             integration_type,
             provider,
         )

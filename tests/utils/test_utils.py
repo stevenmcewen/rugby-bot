@@ -91,6 +91,15 @@ def test_matches_type_datetime_accepts_datetime_and_object_and_strings():
     assert utils.matches_type(s_obj, "datetime") is True
 
 
+def test_matches_type_time_accepts_datetime_and_object_and_strings():
+    s_dt = pd.Series(pd.to_datetime(["2025-12-08 04:05:00", "2025-12-09 19:30:00"]))
+    s_str = pd.Series(["04:05:00", "19:30:00"])
+    s_obj = pd.Series(["2025-12-08 04:05:00", "2025-12-09 19:30:00"], dtype="object")
+    assert utils.matches_type(s_dt, "time") is True
+    assert utils.matches_type(s_str, "time") is True
+    assert utils.matches_type(s_obj, "time") is True
+
+
 # Does the drop_na_rows function drop rows with nan in any specified column?
 # must drop rows with nan in any specified column
 def test_drop_na_rows_drops_rows_with_nan_in_any_specified_column():

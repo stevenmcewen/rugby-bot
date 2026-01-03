@@ -520,6 +520,98 @@ def test_transform_international_results_to_model_ready_data_builds_model_ready_
     assert float(out.loc[0, "TimeDecayWeight"]) == 1.0
 
 
+def test_transform_international_fixtures_to_model_ready_data_keeps_fixtures_and_computes_form_without_scores():
+    """
+    Stage-2 fixtures transform should:
+      - include fixture rows even though scores are missing
+      - compute rolling form from prior results only (fixtures shouldn't count as losses)
+      - drop score columns to avoid leakage
+      - not add targets (HomeWin/PointDiff) for fixtures
+    """
+    event = DummyPreprocessingEvent(
+        integration_provider="rugby365",
+        integration_type="fixtures",
+        source_table="dbo.InternationalMatchFixtures",
+        target_table="dbo.InternationalMatchFixturesModelData",
+    )
+
+    # One upcoming fixture for FRANCE (no scores, has KickoffTimeLocal)
+    fixtures_source = pd.DataFrame(
+        [
+            {
+                "ID": 100,
+                "MatchDate": "2025-12-15",
+                "KickoffTimeLocal": "2025-12-15 18:00:00",
+                "HomeTeam": "FRANCE",
+                "AwayTeam": "WALES",
+                "CompetitionName": "INTERNATIONALS",
+                "Venue": "STADE DE FRANCE",
+                "City": "PARIS",
+                "Country": "FRANCE",
+                "Neutral": False,
+                "WorldCup": False,
+            }
+        ]
+    )
+
+    class FakeSqlClient:
+        def read_table_to_dataframe(self, *, table_name: str, columns=None, where_sql=None, params=None):
+            if table_name == "dbo.InternationalMatchResults":
+                # One prior played match (scores present) so form can be computed.
+                return pd.DataFrame(
+                    [
+                        {
+                            "ID": 1,
+                            "MatchDate": "2025-12-08",
+                            "HomeTeam": "FRANCE",
+                            "AwayTeam": "WALES",
+                            "HomeScore": 10,
+                            "AwayScore": 7,
+                            "CompetitionName": "INTERNATIONALS",
+                            "Venue": "STADE DE FRANCE",
+                            "City": "PARIS",
+                            "Country": "FRANCE",
+                            "Neutral": False,
+                            "WorldCup": False,
+                        }
+                    ]
+                )
+            if table_name == "dbo.InternationalRugbyTeams":
+                # Used both for TeamNameStandardization and add_international_features
+                return pd.DataFrame(
+                    [
+                        {"TeamName": "FRANCE", "Tier": 1, "Hemisphere": "NH"},
+                        {"TeamName": "WALES", "Tier": 1, "Hemisphere": "NH"},
+                    ]
+                )
+            if table_name == "dbo.RugbyVenues":
+                return pd.DataFrame([{"VenueName": "STADE DE FRANCE"}])
+            raise AssertionError(f"Unexpected table read: {table_name}")
+
+    out = helpers.transform_international_fixtures_to_model_ready_data(
+        fixtures_source,
+        event,
+        sql_client=FakeSqlClient(),
+    )
+
+    assert isinstance(out, pd.DataFrame)
+    assert len(out) == 1
+    assert out.loc[0, "ID"] == 100
+    assert pd.notna(out.loc[0, "KickoffTimeLocal"])
+
+    # Scores should be dropped (no leakage)
+    assert "HomeScore" not in out.columns
+    assert "AwayScore" not in out.columns
+
+    # Targets should NOT exist for fixtures
+    assert "PointDiff" not in out.columns
+    assert "HomeWin" not in out.columns
+
+    # Form feature should exist and should reflect the one prior win (not be forced to 0).
+    assert "Home_FormWinRate" in out.columns
+    assert float(out.loc[0, "Home_FormWinRate"]) == 1.0
+
+
 # Does the team_name_standardization function filter to canonical teams only?
 # must filter to canonical teams only
 def test_team_name_standardization_filters_to_canonical_teams_only():

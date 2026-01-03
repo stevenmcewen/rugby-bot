@@ -79,6 +79,16 @@ def matches_type(series: pd.Series, expected: str) -> bool:
                 or pd.api.types.is_object_dtype(series)
             )
 
+        if expected_norm == "time":
+            # SQL schema sometimes uses a semantic "time" for time-of-day or
+            # kickoff timestamps. In pandas this often arrives as datetime64,
+            # or as object/string when loaded from CSV/SQL.
+            return (
+                pd.api.types.is_datetime64_any_dtype(series)
+                or pd.api.types.is_string_dtype(series)
+                or pd.api.types.is_object_dtype(series)
+            )
+
         if expected_norm == "datetime":
             # CSV-backed datetime columns typically arrive as object dtype.
             # Treat datetime64, string, and object columns as acceptable "datetime"

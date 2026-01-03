@@ -250,6 +250,90 @@ def transform_international_results_to_model_ready_data(
         logger.error("Error transforming international results to model ready data: %s", e)
         raise
 
+def transform_international_fixtures_to_model_ready_data(
+    source_data: pd.DataFrame,
+    preprocessing_event: "PreprocessingEvent",    
+    sql_client: SqlClient,
+) -> pd.DataFrame:
+    """
+    Transform the international fixtures data to model-ready data.
+    """
+    try:
+        fixtures_df = source_data.copy()
+        if fixtures_df.empty:
+            logger.warning("No international fixtures rows for preprocessing_event=%s", preprocessing_event.id)
+            return pd.DataFrame()
+        
+        # Add the historical results to the fixtures to allow form computation
+        results_df = sql_client.read_table_to_dataframe(
+                table_name="dbo.InternationalMatchResults",
+                where_sql=None,
+                params= None,
+            )
+        
+        fixtures_df = pd.concat([fixtures_df, results_df], ignore_index=True)
+
+        # Drop audit columns
+        audit_cols = ["CreatedAt"]
+        fixtures_df = fixtures_df.drop(columns=[c for c in audit_cols if c in fixtures_df.columns], errors="ignore")
+
+        # Filter to canonical teams/venues
+        fixtures_df = team_name_standardization(
+            fixtures_df, sql_client,
+            table_name="dbo.InternationalRugbyTeams",
+            home_team_col="HomeTeam", away_team_col="AwayTeam",
+        )
+        fixtures_df = venue_standardisation(
+            fixtures_df, sql_client,
+            table_name="dbo.RugbyVenues",
+            venue_col="Venue",
+        )
+
+        # Add static international team features (Tier, Hemisphere, etc.)
+        fixtures_df = add_international_features(fixtures_df, sql_client)
+
+        # Long format staging
+        team_long = to_team_match_long_format(
+            fixtures_df,
+            id_col="ID",
+            date_col="MatchDate",
+            home_team_col="HomeTeam",
+            away_team_col="AwayTeam",
+            home_score_col="HomeScore",
+            away_score_col="AwayScore",
+            # Include KickoffTimeLocal so we can deterministically order same-day fixtures
+            # after historical results when computing rolling form.
+            extra_context_cols=("KickoffTimeLocal", "CompetitionName", "Venue", "City", "Country", "Neutral", "WorldCup"),
+        )
+
+        # Rolling team form
+        team_form_long = compute_rolling_team_form(team_long, form_window=10)
+
+        # Attach features back to matches (correct arg order)
+        model_base_df = attach_rolling_team_form_to_matches(fixtures_df, team_form_long)
+
+        # Compute the time decay weight (kept for parity with results model data).
+        model_base_df["TimeDecayWeight"] = time_decay_weight(
+            model_base_df,
+            date_col="MatchDate",
+            half_life_years=10.0,
+        )
+
+        # Don’t let the model see scores
+        model_base_df = model_base_df.drop(columns=["HomeScore", "AwayScore"])
+        # make sure columns are correct data types
+        model_base_df["MatchDate"] = pd.to_datetime(
+            model_base_df["MatchDate"],
+            errors="coerce"
+        ).dt.normalize()
+
+        # only return the fixtures rows
+        model_base_df = model_base_df[model_base_df["KickoffTimeLocal"].notna()].reset_index(drop=True)
+        return model_base_df
+
+    except Exception as e:
+        logger.error("Error transforming international fixtures to model ready data: %s", e)
+        raise
 
 ### Validation functions ###
 def validate_transformed_data(transformed_data: pd.DataFrame, target_schema: dict) -> None:
@@ -800,16 +884,33 @@ def to_team_match_long_format(
         # join the home and away long dataframes
         long_df = pd.concat([home_long, away_long], ignore_index=True)
 
-        # Outcome comptations from the team perspective
+        # Outcome computations from the team perspective.
         long_df["PointDiff"] = long_df["PointsFor"] - long_df["PointsAgainst"]
-        long_df["Win"] = (long_df["PointDiff"] > 0).astype(int)
-        long_df["Draw"] = (long_df["PointDiff"] == 0).astype(int)
-        long_df["Loss"] = (long_df["PointDiff"] < 0).astype(int)
+        has_scores = long_df["PointsFor"].notna() & long_df["PointsAgainst"].notna()
+
+        long_df["Win"] = pd.Series(pd.NA, index=long_df.index, dtype="Int64")
+        long_df.loc[has_scores, "Win"] = (long_df.loc[has_scores, "PointDiff"] > 0).astype("Int64")
+
+        long_df["Draw"] = pd.Series(pd.NA, index=long_df.index, dtype="Int64")
+        long_df.loc[has_scores, "Draw"] = (long_df.loc[has_scores, "PointDiff"] == 0).astype("Int64")
+
+        long_df["Loss"] = pd.Series(pd.NA, index=long_df.index, dtype="Int64")
+        long_df.loc[has_scores, "Loss"] = (long_df.loc[has_scores, "PointDiff"] < 0).astype("Int64")
 
         # Sort for stable rolling calculations
         long_df[date_col] = pd.to_datetime(long_df[date_col], errors="coerce")
-        # sort the dataframe by team, date, and id
-        long_df = long_df.sort_values(["Team", date_col, id_col]).reset_index(drop=True)
+
+        # Deterministic ordering:
+        if "KickoffTimeLocal" in long_df.columns:
+            kickoff_dt = pd.to_datetime(long_df["KickoffTimeLocal"], errors="coerce")
+            long_df["_SortDateTime"] = kickoff_dt.fillna(long_df[date_col])
+            sort_cols = ["Team", "_SortDateTime", id_col]
+        else:
+            sort_cols = ["Team", date_col, id_col]
+
+        long_df = long_df.sort_values(sort_cols).reset_index(drop=True)
+        if "_SortDateTime" in long_df.columns:
+            long_df = long_df.drop(columns=["_SortDateTime"])
 
         return long_df
     except Exception as e:
@@ -838,34 +939,17 @@ def compute_rolling_team_form(
         df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
         df = df.sort_values(["Team", date_col, "ID"]).reset_index(drop=True)
 
-        # Compute per-team rolling features (transform keeps index aligned)
-        df["FormWinRate"] = (
-            df.groupby("Team")["Win"]
-              .transform(lambda s: roll_mean(s, form_window))
-        )
-        df["FormDrawRate"] = (
-            df.groupby("Team")["Draw"]
-              .transform(lambda s: roll_mean(s, form_window))
-        )
-        df["FormPointsFor"] = (
-            df.groupby("Team")["PointsFor"]
-              .transform(lambda s: roll_mean(s, form_window))
-        )
-        df["FormPointsAgainst"] = (
-            df.groupby("Team")["PointsAgainst"]
-              .transform(lambda s: roll_mean(s, form_window))
-        )
-        df["FormPointDiff"] = (
-            df.groupby("Team")["PointDiff"]
-              .transform(lambda s: roll_mean(s, form_window))
-        )
+        # Compute per-team rolling features (transform keeps index aligned).
+        # We rely on NaNs (for fixtures/no-scores rows) to be ignored by rolling mean/sum.
+        df["FormWinRate"] = df.groupby("Team")["Win"].transform(lambda s: roll_mean(s, form_window))
+        df["FormDrawRate"] = df.groupby("Team")["Draw"].transform(lambda s: roll_mean(s, form_window))
+        df["FormPointsFor"] = df.groupby("Team")["PointsFor"].transform(lambda s: roll_mean(s, form_window))
+        df["FormPointsAgainst"] = df.groupby("Team")["PointsAgainst"].transform(lambda s: roll_mean(s, form_window))
+        df["FormPointDiff"] = df.groupby("Team")["PointDiff"].transform(lambda s: roll_mean(s, form_window))
 
-        # form_games = rolling count of prior matches in the window
-        outcome_count = df["Win"] + df["Draw"] + df["Loss"]
-        df["FormGames"] = (
-            outcome_count.groupby(df["Team"])
-                         .transform(lambda s: roll_sum(s, form_window))
-        )
+        # FormGames = rolling count of *played* prior matches (ignore fixtures).
+        played = (df["PointsFor"].notna() & df["PointsAgainst"].notna()).astype("Int64")
+        df["FormGames"] = played.groupby(df["Team"]).transform(lambda s: roll_sum(s, form_window))
         # Rolling ops + shift introduce NaNs, which forces float dtype; cast back to nullable int.
         # Values should be whole numbers (counts), so rounding is safe.
         df["FormGames"] = df["FormGames"].round(0).astype("Int64")
