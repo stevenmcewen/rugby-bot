@@ -9,9 +9,11 @@ from azure.identity import DefaultAzureCredential
 import pyodbc
 import struct 
 import pandas as pd
+import json
 
 from functions.config.settings import AppSettings
 from functions.logging.logger import get_logger
+from functions.utils.utils import normalize_dataframe_dtypes
 
 logger = get_logger(__name__)
 
@@ -911,3 +913,298 @@ class SqlClient:
         except Exception as e:
             logger.error("Error loading venue database from dbo.RugbyVenues: %s", e)
             raise
+
+    ## model helpers ###
+    def get_model_specs_by_model_group_key(self, model_group_key: str) -> dict:
+        """
+        Get the full model specification bundle for a given model_group_key.
+
+        Returns a dict containing:
+        - group: shared config (dataset sources, enabled flag)
+        - models: list of models in the group (each with trainer + target)
+        - columns: columns by role (entity/feature/target + optional weight)
+        """
+        try:
+            with self.engine.connect() as conn:
+                # 1) Model group
+                group_result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            ModelGroupKey,
+                            TrainingDatasetSource,
+                            ScoringDatasetSource,
+                            IsEnabled
+                        FROM dbo.ModelGroup
+                        WHERE ModelGroupKey = :model_group_key;
+                        """
+                    ),
+                    {"model_group_key": model_group_key},
+                )
+                group_row = group_result.fetchone()
+                if group_row is None:
+                    raise ValueError(f"No ModelGroup found for model_group_key={model_group_key!r}")
+
+                group_spec = {
+                    "model_group_key": group_row[0],
+                    "training_dataset_source": group_row[1],
+                    "scoring_dataset_source": group_row[2],
+                    "is_enabled": bool(group_row[3]),
+                }
+
+                if not group_spec["is_enabled"]:
+                    raise ValueError(f"ModelGroup {model_group_key!r} is disabled")
+
+                # 2) Models in group
+                models_result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            ModelKey,
+                            TrainerKey,
+                            TargetColumn,
+                            PredictionType,
+                            IsEnabled,
+                            SampleWeightColumn,
+                            TimeColumn,
+                            ModelParametersJson,
+                            TrainerParametersJson
+                        FROM dbo.ModelRegistry
+                        WHERE ModelGroupKey = :model_group_key
+                        ORDER BY ModelKey;
+                        """
+                    ),
+                    {"model_group_key": model_group_key},
+                )
+                model_rows = models_result.fetchall()
+                if not model_rows:
+                    raise ValueError(f"No models registered in ModelRegistry for model_group_key={model_group_key!r}")
+
+                models = []
+                for row in model_rows:
+                    # First need to make sure that the ModelParametersJson is valid JSON and can be parsed
+                    raw_model_params = row[7]
+                    raw_trainer_params = row[8]
+
+                    if raw_model_params is None or str(raw_model_params).strip() == "":
+                        model_params = {}
+
+                    else:
+                        try:
+                            model_params = json.loads(raw_model_params)
+                        except json.JSONDecodeError as e:
+                            raise ValueError(
+                                f"Invalid JSON in ModelRegistry.ModelParametersJson for ModelKey={row[0]!r}: {e}"
+                            ) from e
+                        
+                    if raw_trainer_params is None or str(raw_trainer_params).strip() == "":
+                        trainer_params = {}
+                    else:
+                        try:
+                            trainer_params = json.loads(raw_trainer_params)
+                        except json.JSONDecodeError as e:
+                            raise ValueError(
+                                f"Invalid JSON in ModelRegistry.TrainerParametersJson for ModelKey={row[0]!r}: {e}"
+                            ) from e
+                    
+                    # append the model spec
+                    models.append(
+                        {
+                            "model_key": row[0],
+                            "trainer_key": row[1],
+                            "target_column": row[2],
+                            "prediction_type": row[3],
+                            "is_enabled": bool(row[4]),
+                            "sample_weight_column": row[5],
+                            "time_column": row[6],
+                            "model_parameters": model_params,
+                            "trainer_parameters": trainer_params,
+                        }
+                    )
+
+                enabled_models = [m for m in models if m["is_enabled"]]
+                if not enabled_models:
+                    raise ValueError(f"All models in group {model_group_key!r} are disabled")
+
+                # 3) Columns by role
+                cols_result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            ColumnName,
+                            ColumnRole,
+                            IsActive,
+                            OrdinalPosition
+                        FROM dbo.ModelColumn
+                        WHERE ModelGroupKey = :model_group_key
+                        ORDER BY
+                            CASE ColumnRole
+                                WHEN 'entity' THEN 1
+                                WHEN 'feature' THEN 2
+                                WHEN 'weight' THEN 3
+                                WHEN 'target' THEN 4
+                                ELSE 99
+                            END,
+                            OrdinalPosition;
+                        """
+                    ),
+                    {"model_group_key": model_group_key},
+                )
+                col_rows = cols_result.fetchall()
+
+                columns = {
+                    "entity": [],
+                    "feature": [],
+                    "target": [],
+                    "weight": None,   # single column name if present
+                }
+
+                for row in col_rows:
+                    column_name = row[0]
+                    column_role = row[1]
+                    is_active = bool(row[2])
+
+                    if not is_active:
+                        continue
+
+                    if column_role in ("entity", "feature", "target"):
+                        columns[column_role].append(column_name)
+                    elif column_role == "weight":
+                        # allow at most one weight column
+                        if columns["weight"] is not None and columns["weight"] != column_name:
+                            raise ValueError(
+                                f"Multiple active weight columns found for {model_group_key!r}: "
+                                f"{columns['weight']!r} and {column_name!r}"
+                            )
+                        columns["weight"] = column_name
+
+                if not columns["feature"]:
+                    raise ValueError(f"No active feature columns found for model_group_key={model_group_key!r}")
+
+                spec_bundle = {
+                    **group_spec,
+                    "models": enabled_models,
+                    "columns": columns,
+                }
+                return spec_bundle
+
+        except Exception as e:
+            logger.error("Error getting model specs for model_group_key='%s': %s", model_group_key, e)
+            raise
+
+    def get_model_source_data(
+        self,
+        source_table: str,
+        columns_to_select: list[str],
+    ) -> pd.DataFrame:
+        """
+        Get the source data for a given model.
+        Return the source data as a pandas DataFrame.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(sa.text(f"SELECT {', '.join(columns_to_select)} FROM {source_table}"))
+                rows = result.fetchall()
+                df = pd.DataFrame(rows, columns=columns_to_select)
+                normalized_df = normalize_dataframe_dtypes(df)
+                return normalized_df
+        except Exception as e:
+            logger.error("Error getting model source data for source_table='%s' and columns_to_select='%s': %s", source_table, columns_to_select, e)
+            raise
+
+
+    def persist_artifact_metadata(
+        self,
+        *,
+        system_event_id: str,
+        model_key: str,
+        trainer_key: str,
+        prediction_type: str,
+        target_column: str,
+        schema_hash: str,
+        artifact_version: int,
+        blob_container: str,
+        blob_path: str,
+        metrics: dict | None,
+    ) -> tuple[str, int]:
+        """
+        Insert a ModelArtifacts row and return (artifact_id, artifact_version).
+        """
+        try:
+            metrics_json = json.dumps(metrics) if metrics is not None else None
+
+            sql = sa.text("""
+                INSERT INTO dbo.ModelArtifacts (
+                    ArtifactId,
+                    ArtifactVersion,
+                    SystemEventId,
+                    ModelKey,
+                    TrainerKey,
+                    PredictionType,
+                    TargetColumn,
+                    SchemaHash,
+                    BlobContainer,
+                    BlobPath,
+                    Metrics
+                )
+                OUTPUT inserted.ArtifactId
+                VALUES (
+                    NEWID(),
+                    :artifact_version,
+                    :system_event_id,
+                    :model_key,
+                    :trainer_key,
+                    :prediction_type,
+                    :target_column,
+                    :schema_hash,
+                    :blob_container,
+                    :blob_path,
+                    :metrics
+                );
+            """)
+
+            with self.engine.begin() as conn:
+                artifact_id = conn.execute(
+                    sql,
+                    {
+                        "artifact_version": artifact_version,
+                        "system_event_id": system_event_id,
+                        "model_key": model_key,
+                        "trainer_key": trainer_key,
+                        "prediction_type": prediction_type,
+                        "target_column": target_column,
+                        "schema_hash": schema_hash,
+                        "blob_container": blob_container,
+                        "blob_path": blob_path,
+                        "metrics": metrics_json,
+                    },
+                ).scalar_one()
+
+            return str(artifact_id), artifact_version
+
+        except Exception as e:
+            logger.error("Error persisting model artifact metadata: %s", e)
+            raise
+
+    def get_next_artifact_version(self, *, model_key: str) -> int:
+        """
+        Get the next artifact version number for a given model_key.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT ISNULL(MAX(ArtifactVersion), 0) + 1
+                        FROM dbo.ModelArtifacts
+                        WHERE ModelKey = :model_key;
+                        """
+                    ),
+                    {"model_key": model_key},
+                )
+                next_version = result.scalar()
+                return next_version
+        except Exception as e:
+            logger.error("Error getting next artifact version for model_key='%s': %s", model_key, e)
+            raise   
+
