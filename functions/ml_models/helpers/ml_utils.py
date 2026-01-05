@@ -89,6 +89,30 @@ def persist_model_artifact(sql_client, system_event_id, model_key, trainer_key, 
 
     return artefact_id, artefact_version
 
+def load_model_artifact(artifact_details: dict) -> Any:
+    """
+    Load a model artifact from blob storage.
+    Accepts:
+        artifact_details: A dictionary containing the blob_path and blob_container.
+    
+    Returns:
+        The deserialized trained model instance.
+    """
+    blob_path = artifact_details.get("blob_path")
+    container_name = artifact_details.get("blob_container")
+    if not blob_path or not container_name:
+        raise ValueError("artifact_details must contain 'blob_path' and 'blob_container' keys")
+
+    logger.info(f"Downloading model artifact from blob storage at {container_name}/{blob_path}")
+    
+    artifact_bytes = download_bytes_from_blob(
+        container_name=container_name,
+        blob_path=blob_path
+    )
+    logger.info("Deserializing model artifact")
+    model_artifact =  deserialize_model_artifact(artifact_bytes)
+    return model_artifact
+
 def build_blob_path(*, model_key: str, artifact_version: int) -> str:
     """
     Build a blob storage path for the model artifact based on its metadata.
@@ -125,3 +149,25 @@ def upload_bytes_to_blob(*, container_name: str, blob_path: str, data: bytes) ->
 
     blob_client.upload_blob(data, overwrite=True)
 
+def download_bytes_from_blob(*, container_name: str, blob_path: str) -> bytes:
+    """
+    Download a bytes object from blob storage at the specified container and path.
+    Accepts:
+        container_name: The name of the container to download the data from.
+        blob_path: The path to the blob in the container.
+    Returns:
+        A bytes object containing the downloaded data.
+    """
+    if not container_name:
+        raise ValueError("container_name must be provided (artifact container is not configured)")
+    if not settings.storage_connection:
+        raise ValueError("storage_connection is not configured")
+
+    blob_client = BlobClient.from_connection_string(
+                conn_str=settings.storage_connection,
+                container_name=container_name,
+                blob_name=blob_path,
+            )
+
+    blob_bytes = blob_client.download_blob().readall()
+    return blob_bytes

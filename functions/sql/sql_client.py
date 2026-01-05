@@ -934,7 +934,8 @@ class SqlClient:
                             ModelGroupKey,
                             TrainingDatasetSource,
                             ScoringDatasetSource,
-                            IsEnabled
+                            IsEnabled,
+                            ResultsTableName
                         FROM dbo.ModelGroup
                         WHERE ModelGroupKey = :model_group_key;
                         """
@@ -950,6 +951,7 @@ class SqlClient:
                     "training_dataset_source": group_row[1],
                     "scoring_dataset_source": group_row[2],
                     "is_enabled": bool(group_row[3]),
+                    "results_table_name": group_row[4],
                 }
 
                 if not group_spec["is_enabled"]:
@@ -1206,5 +1208,60 @@ class SqlClient:
                 return next_version
         except Exception as e:
             logger.error("Error getting next artifact version for model_key='%s': %s", model_key, e)
-            raise   
+            raise
+
+    def get_latest_model_artifact_details(self, *, model_key: str, trainer_key: str) -> dict | None:
+        """
+        Get the latest model artifact metadata for a given model_key.
+        Returns a dict with the artifact metadata, or None if no artifact found.
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    sa.text(
+                        """
+                        SELECT TOP 1
+                            ArtifactId,
+                            ArtifactVersion,
+                            SystemEventId,
+                            ModelKey,
+                            TrainerKey,
+                            PredictionType,
+                            TargetColumn,
+                            SchemaHash,
+                            BlobContainer,
+                            BlobPath,
+                            Metrics,
+                            CreatedAt
+                        FROM dbo.ModelArtifacts
+                        WHERE ModelKey = :model_key
+                        AND TrainerKey = :trainer_key
+                        ORDER BY ArtifactVersion DESC;
+                        """
+                    ),
+                    {"model_key": model_key, "trainer_key": trainer_key},
+                )
+                row = result.fetchone()
+                if row is None:
+                    return None
+
+                artifact_metadata = {
+                    "artifact_id": str(row[0]),
+                    "artifact_version": row[1],
+                    "system_event_id": row[2],
+                    "model_key": row[3],
+                    "trainer_key": row[4],
+                    "prediction_type": row[5],
+                    "target_column": row[6],
+                    "schema_hash": row[7],
+                    "blob_container": row[8],
+                    "blob_path": row[9],
+                    "metrics": json.loads(row[10]) if row[10] else None,
+                    "created_at": row[11],
+                }
+                return artifact_metadata
+        except Exception as e:
+            logger.error("Error getting latest artifact for model_key='%s': %s", model_key, e)
+            raise
+    
 
