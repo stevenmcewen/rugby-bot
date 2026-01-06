@@ -183,7 +183,7 @@ def test_rugby365_results_pipeline_happy_path_calls_validators_and_write(monkeyp
 def test_rugby365_fixtures_pipeline_happy_path_calls_validators_and_write(monkeypatch):
     event = DummyEvent("rugby365_international_fixtures_preprocessing")
 
-    called = {"source": 0, "validate_source": 0, "validate_trans": 0, "write": 0}
+    called = {"source": 0, "validate_source": 0, "validate_trans": 0, "truncate": 0, "write": 0}
 
     src = pd.DataFrame([{"a": 1}])
     out = pd.DataFrame([{"b": 2}])
@@ -201,18 +201,23 @@ def test_rugby365_fixtures_pipeline_happy_path_calls_validators_and_write(monkey
     def fake_validate_trans(*_a, **_k):
         called["validate_trans"] += 1
 
+    def fake_truncate(*_a, **_k):
+        called["truncate"] += 1
+
     def fake_write(*_a, **_k):
         called["write"] += 1
 
     monkeypatch.setattr(pipes, "validate_source_data", fake_validate_source, raising=True)
     monkeypatch.setattr(pipes, "transform_rugby365_fixtures_data_to_international_fixtures", fake_transform, raising=True)
     monkeypatch.setattr(pipes, "validate_transformed_data", fake_validate_trans, raising=True)
+    monkeypatch.setattr(pipes, "truncate_target_table", fake_truncate, raising=True)
     monkeypatch.setattr(pipes, "write_data_to_target_table", fake_write, raising=True)
 
     pipes.rugby365_international_fixtures_preprocessing_pipeline(event, sql_client=SimpleNamespace())
 
     assert called["validate_source"] == 1
     assert called["validate_trans"] == 1
+    assert called["truncate"] == 1
     assert called["write"] == 1
 
 
@@ -281,3 +286,70 @@ def test_model_ready_pipeline_happy_path_truncates_and_writes(monkeypatch):
     assert called["validate_trans"] == 1
     assert called["truncate"] == 1
     assert called["write"] == 1
+
+
+def test_fixtures_model_ready_pipeline_no_source_rows_is_noop(monkeypatch):
+    event = DummyEvent("international_fixtures_to_model_ready_data_preprocessing")
+
+    called = {"truncate": 0, "write": 0}
+
+    monkeypatch.setattr(pipes, "get_source_data", lambda *_a, **_k: pd.DataFrame(), raising=True)
+
+    def fake_truncate(*_a, **_k):
+        called["truncate"] += 1
+
+    def fake_write(*_a, **_k):
+        called["write"] += 1
+
+    monkeypatch.setattr(pipes, "truncate_target_table", fake_truncate, raising=True)
+    monkeypatch.setattr(pipes, "write_data_to_target_table", fake_write, raising=True)
+
+    pipes.international_fixtures_to_model_ready_data_preprocessing_pipeline(event, sql_client=SimpleNamespace())
+    assert called["truncate"] == 0
+    assert called["write"] == 0
+
+
+def test_fixtures_model_ready_pipeline_happy_path_truncates_then_writes(monkeypatch):
+    event = DummyEvent("international_fixtures_to_model_ready_data_preprocessing")
+
+    called = {"validate_source": 0, "validate_trans": 0}
+    call_order: list[str] = []
+
+    src = pd.DataFrame([{"a": 1}])
+    out = pd.DataFrame([{"KickoffTimeLocal": pd.Timestamp("2025-12-15 18:00:00")}])
+
+    monkeypatch.setattr(pipes, "get_source_data", lambda *_a, **_k: src, raising=True)
+    monkeypatch.setattr(pipes, "get_source_schema", lambda *_a, **_k: {"columns": []}, raising=True)
+    monkeypatch.setattr(pipes, "get_target_schema", lambda *_a, **_k: {"columns": []}, raising=True)
+
+    def fake_validate_source(*_a, **_k):
+        called["validate_source"] += 1
+
+    def fake_transform(*_a, **_k):
+        return out
+
+    def fake_validate_trans(*_a, **_k):
+        called["validate_trans"] += 1
+
+    def fake_truncate(*_a, **_k):
+        call_order.append("truncate")
+
+    def fake_write(*_a, **_k):
+        call_order.append("write")
+
+    monkeypatch.setattr(pipes, "validate_source_data", fake_validate_source, raising=True)
+    monkeypatch.setattr(
+        pipes,
+        "transform_international_fixtures_to_model_ready_data",
+        fake_transform,
+        raising=True,
+    )
+    monkeypatch.setattr(pipes, "validate_transformed_data", fake_validate_trans, raising=True)
+    monkeypatch.setattr(pipes, "truncate_target_table", fake_truncate, raising=True)
+    monkeypatch.setattr(pipes, "write_data_to_target_table", fake_write, raising=True)
+
+    pipes.international_fixtures_to_model_ready_data_preprocessing_pipeline(event, sql_client=SimpleNamespace())
+
+    assert called["validate_source"] == 1
+    assert called["validate_trans"] == 1
+    assert call_order == ["truncate", "write"]

@@ -410,7 +410,7 @@ def scrape_values(
     )
     if not last_ingestion_event_created_at:
         # Use a conservative bootstrap start date when nothing has been ingested yet.
-        last_ingestion_event_created_at = datetime(2024, 8, 18)
+        last_ingestion_event_created_at = datetime(2025, 10, 1)
 
     # get the scraping dates (inclusive range from last_ingestion_event_created_at to today)
     scraping_dates = to_date_range(last_ingestion_event_created_at.date(), today.date())

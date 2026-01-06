@@ -232,42 +232,42 @@ def TrainInternationalRugbyFixturesModelFunction(timer: func.TimerRequest) -> No
         )
         raise
 
-# @app.schedule(
-#     schedule="0 0 6 * * *", # 06:00 UTC daily
-#     arg_name="timer",
-#     run_on_startup=False,
-#     use_monitor=True,
-# )
-# def ScoreUpcomingInternationalRugbyFixturesFunction(timer: func.TimerRequest) -> None:
-#     """
-#     Score the upcoming international rugby fixtures.
-#     """
-#     logger.info("ScoreUpcomingInternationalRugbyFixturesFunction triggered.")
-#     system_event = sql_client.start_system_event(
-#         function_name="ScoreUpcomingInternationalRugbyFixturesFunction",
-#         trigger_type="timer",
-#         event_type="model_scoring",
-#     )
+@app.schedule(
+    schedule="0 0 6 * * *", # 06:00 UTC daily
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def ScoreUpcomingInternationalRugbyFixturesFunction(timer: func.TimerRequest) -> None:
+    """
+    Score the upcoming international rugby fixtures.
+    """
+    logger.info("ScoreUpcomingInternationalRugbyFixturesFunction triggered.")
+    system_event = sql_client.start_system_event(
+        function_name="ScoreUpcomingInternationalRugbyFixturesFunction",
+        trigger_type="timer",
+        event_type="model_scoring",
+    )
 
-#     try:
-#         orchestrate_model_scoring(
-#             sql_client=sql_client, 
-#             system_event_id=system_event.id,
-#             pipeline_name="default_model_scoring",
-#             model_group_key="international_rugby_fixtures",
-#         )
-#         sql_client.complete_system_event(
-#             system_event_id=system_event.id,
-#             status="succeeded",
-#         )
-#     except Exception as exc: 
-#         logger.exception("ScoreUpcomingInternationalRugbyFixturesFunction failed.")
-#         sql_client.complete_system_event(
-#             system_event_id=system_event.id,
-#             status="failed",
-#             details=str(exc),
-#         )
-#         raise
+    try:
+        orchestrate_model_scoring(
+            sql_client=sql_client, 
+            system_event_id=system_event.id,
+            pipeline_name="default_model_scoring",
+            model_group_key="international_rugby_fixtures",
+        )
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc: 
+        logger.exception("ScoreUpcomingInternationalRugbyFixturesFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
 
 # #------------------------------------------------------------------------------------------------
 # # Testing functions
@@ -476,6 +476,60 @@ def TrainInternationalRugbyFixturesModelFunction(timer: func.TimerRequest) -> No
 #                 {
 #                     "status": "error",
 #                     "message": "TrainInternationalRugbyFixturesModelFunctionTest failed",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=500,
+#             mimetype="application/json",
+#         )
+#         raise
+
+# # Score upcoming international rugby fixtures.
+# @app.route(route="ScoreUpcomingInternationalRugbyFixturesFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
+# def ScoreUpcomingInternationalRugbyFixturesFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
+#     """
+#     Score upcoming international rugby fixtures.
+#     """
+#     logger.info("ScoreUpcomingInternationalRugbyFixturesFunctionTest triggered.")
+#     system_event = sql_client.start_system_event(
+#         function_name="ScoreUpcomingInternationalRugbyFixturesFunctionTest",
+#         trigger_type="test",
+#         event_type="model_scoring",
+#     )
+#     try:
+#         orchestrate_model_scoring(
+#             sql_client=sql_client,
+#             system_event_id=system_event.id,
+#             pipeline_name="default_model_scoring",
+#             model_group_key="international_rugby_fixtures",
+#         )
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="succeeded",
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "ok",
+#                     "message": "ScoreUpcomingInternationalRugbyFixturesFunctionTest triggered",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=200,
+#             mimetype="application/json",
+#         )
+#     except Exception as exc:
+#         logger.exception("ScoreUpcomingInternationalRugbyFixturesFunctionTest failed.")
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="failed",
+#             details=str(exc),
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "error",
+#                     "message": "ScoreUpcomingInternationalRugbyFixturesFunctionTest failed",
 #                     "system_event_id": str(system_event.id),
 #                 }
 #             ),
