@@ -23,6 +23,20 @@ def test_build_model_pipeline_for_default_training_contains_expected_steps():
         "PersistModelArtifactsStep",
     ]
 
+def test_build_model_pipeline_for_default_scoring_contains_expected_steps():
+    pipeline = pipes.build_model_pipeline_for("default_model_scoring")
+    step_names = [s.__class__.__name__ for s in pipeline._steps]  # type: ignore[attr-defined]
+    assert step_names == [
+        "StartScoringRunStep",
+        "LoadModelSpecStep",
+        "LoadDataStep",
+        "PrepareScoringContextStep",
+        "LoadModelArtifactsStep",
+        "ScoreModelsStep",
+        "CombineScoringResultsStep",
+        "PersistScoringResultsStep",
+    ]
+
 # Tests the LoadDataStep to ensure it selects the correct columns for training
 def test_load_data_step_selects_expected_columns_for_training(monkeypatch):
     captured = {}
@@ -62,6 +76,14 @@ def test_start_training_run_step_sets_initial_status():
     assert out["status"] == "started"
     assert out["run_type"] == "training"
     assert out["sql_client"] is context["sql_client"]
+    assert out["system_event_id"] == "sys"
+
+def test_start_scoring_run_step_sets_initial_status():
+    ctx = {"sql_client": object(), "system_event_id": "sys"}
+    out = pipes.StartScoringRunStep()(ctx)
+    assert out["status"] == "started"
+    assert out["run_type"] == "scoring"
+    assert out["sql_client"] is ctx["sql_client"]
     assert out["system_event_id"] == "sys"
 
 # Tests the PrepareTrainingContextStep to ensure it computes schema hash and validates columns
@@ -261,4 +283,159 @@ def test_load_data_step_raises_on_invalid_run_type():
     with pytest.raises(ValueError, match="Invalid run type"):
         pipes.LoadDataStep()(context)
 
+
+def test_prepare_scoring_context_sets_index_and_shared_features(monkeypatch):
+    monkeypatch.setattr(pipes, "stable_schema_hash", lambda cols: "HASH:" + ",".join(cols))
+    data = pd.DataFrame(
+        {
+            "TeamId": [10, 20],
+            "MatchId": [1, 2],
+            "F1": [0.1, 0.2],
+            "F2": [3, 4],
+        }
+    )
+    ctx = {
+        "data": data,
+        "model_specs": {"columns": {"entity": ["TeamId", "MatchId"], "feature": ["F1", "F2"]}},
+    }
+    out = pipes.PrepareScoringContextStep()(ctx)
+    assert out["status"] == "preparing_scoring"
+    assert out["resolved_schema_hash"] == "HASH:F1,F2"
+    assert out["resolved_entity_columns"] == ["TeamId", "MatchId"]
+    assert out["resolved_feature_columns"] == ["F1", "F2"]
+    assert list(out["X_shared"].columns) == ["F1", "F2"]
+    # entity columns should now be the index (and still present as columns due to drop=False)
+    assert list(out["data"].index.names) == ["TeamId", "MatchId"]
+    assert "TeamId" in out["data"].columns
+
+
+def test_prepare_scoring_context_raises_on_missing_columns():
+    data = pd.DataFrame({"ID": [1], "F1": [1]})
+    with pytest.raises(ValueError, match="Missing entity columns"):
+        pipes.PrepareScoringContextStep()(
+            {"data": data, "model_specs": {"columns": {"entity": ["MissingId"], "feature": ["F1"]}}}
+        )
+    with pytest.raises(ValueError, match="Missing feature columns"):
+        pipes.PrepareScoringContextStep()(
+            {"data": data, "model_specs": {"columns": {"entity": ["ID"], "feature": ["MissingF"]}}}
+        )
+
+
+def test_load_model_artifacts_step_loads_each_enabled_model(monkeypatch):
+    calls = {"loaded": []}
+
+    class FakeSqlClient:
+        def get_latest_model_artifact_details(self, *, model_key: str, trainer_key: str):
+            calls["loaded"].append((model_key, trainer_key))
+            return {"blob_container": "cont", "blob_path": f"models/{model_key}.pkl"}
+
+    monkeypatch.setattr(pipes, "load_model_artifact", lambda details: f"artifact:{details['blob_path']}")
+
+    ctx = {
+        "sql_client": FakeSqlClient(),
+        "model_specs": {"models": [{"model_key": "m1", "trainer_key": "t1"}, {"model_key": "m2", "trainer_key": "t2"}]},
+    }
+    out = pipes.LoadModelArtifactsStep()(ctx)
+    assert calls["loaded"] == [("m1", "t1"), ("m2", "t2")]
+    assert out["model_artifacts"]["m1"] == "artifact:models/m1.pkl"
+    assert out["model_artifacts"]["m2"] == "artifact:models/m2.pkl"
+
+
+def test_score_models_step_scores_each_model_and_returns_context(monkeypatch):
+    X = pd.DataFrame({"F": [1, 2]}, index=pd.Index([100, 200], name="ID"))
+
+    def fake_score_model(*, model_object, X):
+        return pd.Series([0.2, 0.8], index=X.index, name="score")
+
+    monkeypatch.setattr(pipes, "score_model", fake_score_model)
+
+    ctx = {"X_shared": X, "model_artifacts": {"m1": object(), "m2": object()}}
+    out = pipes.ScoreModelsStep()(ctx)
+    assert out["status"] == "scored"
+    assert set(out["scoring_results"].keys()) == {"m1", "m2"}
+    assert out["scoring_results"]["m1"].index.equals(X.index)
+
+
+def test_combine_scoring_results_step_builds_wide_dataframe():
+    base = pd.DataFrame({"ID": [1, 2], "Other": [9, 9]}).set_index(["ID"], drop=False)
+    s1 = pd.Series([0.1, 0.2], index=base.index, name="score")
+    s2 = pd.Series([0.3, 0.4], index=base.index, name="score")
+    ctx = {
+        "data": base,
+        "resolved_entity_columns": ["ID"],
+        "scoring_results": {"m1": s1, "m2": s2},
+    }
+    out = pipes.CombineScoringResultsStep()(ctx)
+    df = out["scored_df"]
+    assert list(df.columns) == ["ID", "m1", "m2"]
+    assert df["m1"].tolist() == [0.1, 0.2]
+
+
+def test_persist_scoring_results_step_adds_metadata_validates_and_writes(monkeypatch):
+    captured = {}
+
+    class FakeSqlClient:
+        def get_schema(self, *, table_name: str):
+            captured["schema_table"] = table_name
+            # Must match the real SqlClient.get_schema() contract, as the step builds a schema_dict
+            # from these keys.
+            return [
+                {"column_name": "ID", "data_type": "int", "is_required": True},
+                {"column_name": "m1", "data_type": "float", "is_required": False},
+                {"column_name": "SystemEventId", "data_type": "nvarchar", "is_required": True},
+                {"column_name": "ScoredAtUtc", "data_type": "datetimeoffset", "is_required": True},
+                {"column_name": "ModelGroupKey", "data_type": "nvarchar", "is_required": True},
+            ]
+
+        def write_dataframe_to_table(self, *, df, table_name: str, if_exists: str = "append"):
+            captured["df"] = df.copy()
+            captured["table_name"] = table_name
+            captured["if_exists"] = if_exists
+
+    def fake_validate_transformed_data(*, transformed_data, target_schema):
+        captured["validated"] = True
+        captured["validated_df"] = transformed_data
+        captured["validated_schema"] = target_schema
+
+    monkeypatch.setattr(pipes, "validate_transformed_data", fake_validate_transformed_data)
+
+    scored_df = pd.DataFrame({"ID": [1, 2], "m1": [0.1, 0.2]}).set_index(["ID"], drop=False)
+    ctx = {
+        "sql_client": FakeSqlClient(),
+        "system_event_id": "sys",
+        "model_group_key": "group",
+        "model_specs": {"results_table_name": "dbo.Results"},
+        "scored_df": scored_df,
+    }
+
+    out = pipes.PersistScoringResultsStep()(ctx)
+    assert out["status"] == "persisted"
+    assert captured["schema_table"] == "dbo.Results"
+    assert captured["table_name"] == "dbo.Results"
+    assert captured["if_exists"] == "append"
+    df = captured["df"]
+    assert "SystemEventId" in df.columns
+    assert "ScoredAtUtc" in df.columns
+    assert "ModelGroupKey" in df.columns
+    assert captured.get("validated") is True
+
+    # validate_transformed_data receives the mutated scored_df + a richer schema dict
+    assert captured["validated_df"] is ctx["scored_df"]
+    assert captured["validated_schema"] == {
+        "columns": ["ID", "m1", "SystemEventId", "ScoredAtUtc", "ModelGroupKey"],
+        "data_types": {
+            "ID": "int",
+            "m1": "float",
+            "SystemEventId": "nvarchar",
+            "ScoredAtUtc": "datetimeoffset",
+            "ModelGroupKey": "nvarchar",
+        },
+        "required": {
+            "ID": True,
+            "m1": False,
+            "SystemEventId": True,
+            "ScoredAtUtc": True,
+            "ModelGroupKey": True,
+        },
+    }
 

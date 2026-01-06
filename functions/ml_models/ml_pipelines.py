@@ -3,14 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 import pandas as pd
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence
+from datetime import datetime, timezone
 
 from functions.config.settings import get_settings
+from functions.data_preprocessing.preprocessing_helpers import validate_transformed_data
 from functions.logging.logger import get_logger
 from functions.sql.sql_client import SqlClient
 from functions.utils.utils import stable_schema_hash, uct_now_iso
 
 from functions.ml_models.helpers.ml_training_helpers import train_model, evaluate_model
-from functions.ml_models.helpers.ml_utils import serialize_model_artifact, persist_model_artifact
+from functions.ml_models.helpers.ml_utils import serialize_model_artifact, persist_model_artifact, load_model_artifact
 from functions.ml_models.helpers.ml_scoring_helpers import score_model
 
 
@@ -225,6 +227,13 @@ class PrepareTrainingContextStep:
         entity_columns: List[str] = columns.get("entity", []) or []
         group_weight_column: Optional[str] = columns.get("weight")
 
+        # Set a stable index for alignment of multiple models to the same entity identifiers.
+        # Keeping drop=False ensures the entity values remain available as columns too.
+        if entity_columns:
+            data = data.copy()
+            data = data.set_index(entity_columns, drop=False)
+            context["data"] = data
+
         # get list of models
         models: List[dict] = spec.get("models", []) or []
         # validate the target columns exist in the data
@@ -251,7 +260,7 @@ class PrepareTrainingContextStep:
         # This is used to validate that identical features are used in the model training and scoring
         context["resolved_schema_hash"] = stable_schema_hash(feature_columns)
 
-        # Optional: keep X once for all models (saves time/memory)
+        # Keep X once for all models (saves time/memory)
         context["X_shared"] = data[feature_columns].copy()
 
         return context
@@ -543,32 +552,195 @@ class PrepareScoringContextStep:
 
         columns = spec.get("columns") or {}
         feature_columns: List[str] = columns.get("feature", []) or []
+        entity_columns: List[str] = columns.get("entity", []) or []
+
+        # validate the feature columns exist in the data
         if not feature_columns:
             raise ValueError("No feature columns found in model_specs['columns']['feature']")
+
+        # Validate entity cols exist in our data (this is needed for aligning scores from multiple models back to entities)
+        missing_entities = [c for c in entity_columns if c not in data.columns]
+        if missing_entities:
+            raise ValueError(f"Missing entity columns in scoring data: {missing_entities}")
 
         missing_features = [c for c in feature_columns if c not in data.columns]
         if missing_features:
             raise ValueError(f"Missing feature columns in scoring data: {missing_features}")
 
         context["resolved_feature_columns"] = feature_columns
+        context["resolved_entity_columns"] = entity_columns
         context["resolved_schema_hash"] = stable_schema_hash(feature_columns)
+
+        # Set a stable index for alignment of multiple models to the same entity identifiers.
+        # Keeping drop=False ensures the entity values remain available as columns too.
+        if entity_columns:
+            data = data.copy()
+            data = data.set_index(entity_columns, drop=False)
+            context["data"] = data
+
         context["X_shared"] = data[feature_columns].copy()
         return context
 
 
 class LoadModelArtifactsStep:
+    """
+    Load model artifacts from for each model in the spec.
+    """
     def __call__(self, context: ModelContext) -> ModelContext:
-        raise NotImplementedError("LoadModelArtifactsStep is not implemented yet.")
+        logger.info("Loading model artifacts")
+
+        for model_spec in context["model_specs"].get("models", []):
+            model_key = model_spec["model_key"]
+            trainer_key = model_spec["trainer_key"]
+
+            logger.info("Loading artifact for model_key=%s trainer_key=%s", model_key, trainer_key)
+            try:
+                sql_client: SqlClient = context["sql_client"]
+                artifact_details = sql_client.get_latest_model_artifact_details(
+                    model_key=model_key,
+                    trainer_key=trainer_key,
+                )
+                if artifact_details is None:
+                    raise ValueError(f"No artifact found for model_key={model_key!r} trainer_key={trainer_key!r}")
+                
+                artifact = load_model_artifact(artifact_details)
+
+                if artifact is None:
+                    raise ValueError(f"Failed to load artifact from path: {artifact_details['blob_path']!r}")
+
+                if "model_artifacts" not in context:
+                    context["model_artifacts"] = {}
+                context["model_artifacts"][model_key] = artifact
+            except Exception as e:
+                logger.error("Error loading artifact for model_key=%s trainer_key=%s: %s", model_key, trainer_key, e)
+                raise
+        return context
 
 
 class ScoreModelsStep:
+    """
+    Score each loaded model against the shared features.
+    """
     def __call__(self, context: ModelContext) -> ModelContext:
-        raise NotImplementedError("ScoreModelsStep is not implemented yet.")
+        logger.info("Scoring models")
+
+        X_shared: pd.DataFrame = context.get("X_shared")
+        if X_shared is None:
+            raise ValueError("No shared features found in context. Run PrepareScoringContextStep first.")
+        
+        model_artifacts: Dict[str, Any] = context.get("model_artifacts") or {}
+        if not model_artifacts:
+            raise ValueError("No model_artifacts found in context. Run LoadModelArtifactsStep first.")
+        
+        scoring_results: Dict[str, pd.Series] = {}
+        for model_key, model_obj in model_artifacts.items():
+            logger.info("Scoring model_key=%s", model_key)
+            try:
+                series_scores = score_model(
+                    model_object=model_obj,
+                    X=X_shared,
+                )
+                scoring_results[model_key] = series_scores
+            except Exception as e:
+                logger.error("Error scoring model_key=%s: %s", model_key, e)
+                raise
+        context["scoring_results"] = scoring_results
+        context["status"] = "scored"
+        return context
+
+
+class CombineScoringResultsStep:
+    """
+    Combine entity columns + per-model scoring series into one wide DataFrame.
+    """
+
+    def __call__(self, context: ModelContext) -> ModelContext:
+        logger.info("Combining scoring results")
+
+        data: pd.DataFrame = context.get("data")
+        if data is None or not isinstance(data, pd.DataFrame):
+            raise ValueError("CombineScoringResultsStep expected context['data'] as a pandas DataFrame")
+
+        entity_cols: List[str] = context.get("resolved_entity_columns") or []
+        scoring_results: Dict[str, pd.Series] = context.get("scoring_results") or {}
+        if not scoring_results:
+            raise ValueError("No scoring_results found in context. Run ScoreModelsStep first.")
+
+        if entity_cols:
+            scored_df = data[entity_cols].copy()
+        else:
+            # Fall back to an empty DF keyed on the current index if no entities configured.
+            scored_df = pd.DataFrame(index=data.index)
+
+        for model_key, scores in scoring_results.items():
+            if not isinstance(scores, pd.Series):
+                raise TypeError(f"Expected pd.Series for model_key={model_key!r}, got {type(scores)}")
+            if not scores.index.equals(scored_df.index):
+                raise ValueError(
+                    f"Scores index for model_key={model_key!r} does not match base index. "
+                    "Ensure scoring uses the same X_shared index for all models in the model group."
+                )
+            scored_df[model_key] = scores.astype("float64")
+
+        context["scored_df"] = scored_df
+        context["status"] = "combined"
+        return context
 
 
 class PersistScoringResultsStep:
+    """
+    Persist the combined scoring results DataFrame to the results table in the sql database.
+    """
     def __call__(self, context: ModelContext) -> ModelContext:
-        raise NotImplementedError("PersistScoringResultsStep is not implemented yet.")
+        logger.info("Persisting scoring results")
+
+        model_specs: dict = context["model_specs"]
+        sql_client: SqlClient = context["sql_client"]
+        system_event_id = context["system_event_id"]
+        model_group_key = context["model_group_key"]
+
+        scored_df = context.get("scored_df")
+        if scored_df is None or not isinstance(scored_df, pd.DataFrame):
+            raise ValueError("PersistScoringResultsStep expected context['scored_df'] as a pandas DataFrame")
+        
+        results_table_name = model_specs.get("results_table_name")
+        if not results_table_name:
+            raise ValueError("Model spec missing 'results_table_name' for persisting scoring results")
+
+        logger.info("Persisting results for model_group_key=%s", model_group_key)
+
+        # add metadata columns to the scored dataframe
+        scored_df["SystemEventId"] = system_event_id
+        scored_df["ScoredAtUtc"] = datetime.now(timezone.utc)
+        scored_df["ModelGroupKey"] = model_group_key
+    
+        # schema check: ensure the scored_df columns match the expected schema in the results table
+        target_schema = sql_client.get_schema(
+        table_name=results_table_name
+        )
+
+        # convert the schema to a richer dictionary keyed by column name (accepted by validate_transformed_data )
+        schema_dict = {
+            "columns": [col["column_name"] for col in target_schema],
+            "data_types": {col["column_name"]: col["data_type"] for col in target_schema},
+            "required": {col["column_name"]: bool(col["is_required"]) for col in target_schema},
+        }
+
+        validate_transformed_data(transformed_data=scored_df, target_schema=schema_dict)
+
+        try:
+            sql_client.write_dataframe_to_table(
+                df=scored_df,
+                table_name=results_table_name,
+                if_exists="append",
+            )
+
+        except Exception as e:
+            logger.error("Error persisting scores for model_group_key=%s: %s", model_group_key, e)
+            raise
+
+        context["status"] = "persisted"
+        return context
 
 ### Pipeline registry / factory ###
 ModelPipelineFactory = Callable[[], Sequence[ModelStep]]
@@ -632,10 +804,10 @@ def default_model_scoring_pipeline_factory() -> tuple[ModelStep, ...]:
         1. Start the scoring run
         2. Load the model specification
         3. Load the scoring data
-        4. Load the model artifacts
-        5. Score the model
-        6. Persist the scoring results
-        7. Finalize the scoring run
+        4. Prepare the scoring context
+        5. Load the model artifacts
+        6. Score the model
+        7. Persist the scoring results
         """
 
     pipeline_steps = (
@@ -645,6 +817,7 @@ def default_model_scoring_pipeline_factory() -> tuple[ModelStep, ...]:
         PrepareScoringContextStep(),
         LoadModelArtifactsStep(),
         ScoreModelsStep(),
+        CombineScoringResultsStep(),
         PersistScoringResultsStep(),
     )
     return pipeline_steps

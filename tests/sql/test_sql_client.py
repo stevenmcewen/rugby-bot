@@ -145,6 +145,79 @@ def _make_client_with_engine(connection: DummyConnection) -> sql_mod.SqlClient:
     client.engine = DummyEngine(connection)
     return client
 
+
+def test_get_latest_model_artifact_details_returns_metadata_and_parses_metrics(monkeypatch):
+    class Result:
+        def fetchone(self):
+            return (
+                "artifact-id",
+                7,
+                "sys-id",
+                "model-key",
+                "trainer-key",
+                "classification",
+                "Target",
+                "schema-hash",
+                "container",
+                "path/to/blob.pkl",
+                '{"acc": 0.9}',
+                datetime(2025, 1, 1),
+            )
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params):
+            assert params["model_key"] == "model-key"
+            assert params["trainer_key"] == "trainer-key"
+            return Result()
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = Engine()
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    out = client.get_latest_model_artifact_details(model_key="model-key", trainer_key="trainer-key")
+    assert out is not None
+    assert out["artifact_id"] == "artifact-id"
+    assert out["artifact_version"] == 7
+    assert out["blob_container"] == "container"
+    assert out["blob_path"] == "path/to/blob.pkl"
+    assert out["metrics"] == {"acc": 0.9}
+
+
+def test_get_latest_model_artifact_details_returns_none_when_missing(monkeypatch):
+    class Result:
+        def fetchone(self):
+            return None
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params):
+            return Result()
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = Engine()
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    assert client.get_latest_model_artifact_details(model_key="m", trainer_key="t") is None
+
 # Does the start_system_event function create a system event?
 # must create a system event and return the correct system event id
 def test_start_system_event_success(monkeypatch):
@@ -831,7 +904,7 @@ def test_get_model_specs_by_model_group_key_happy_path(monkeypatch):
             if "FROM dbo.ModelGroup" in sql_txt:
                 class R:
                     def fetchone(self_inner):
-                        return ("group1", "dbo.Train", "dbo.Score", 1)
+                            return ("group1", "dbo.Train", "dbo.Score", 1, "dbo.Results")
                 return R()
 
             if "FROM dbo.ModelRegistry" in sql_txt:
@@ -872,6 +945,7 @@ def test_get_model_specs_by_model_group_key_happy_path(monkeypatch):
     assert spec["training_dataset_source"] == "dbo.Train"
     assert spec["scoring_dataset_source"] == "dbo.Score"
     assert spec["is_enabled"] is True
+    assert spec["results_table_name"] == "dbo.Results"
 
     assert [m["model_key"] for m in spec["models"]] == ["m1"]
     assert spec["models"][0]["model_parameters"] == {"a": 1}
@@ -893,7 +967,7 @@ def test_get_model_specs_by_model_group_key_raises_if_group_disabled(monkeypatch
             if "FROM dbo.ModelGroup" in sql_txt:
                 class R:
                     def fetchone(self_inner):
-                        return ("group1", "dbo.Train", "dbo.Score", 0)
+                        return ("group1", "dbo.Train", "dbo.Score", 0, "dbo.Results")
                 return R()
             raise AssertionError("Should not query other tables when group disabled")
 
@@ -920,7 +994,7 @@ def test_get_model_specs_by_model_group_key_raises_on_invalid_json(monkeypatch):
             if "FROM dbo.ModelGroup" in sql_txt:
                 class R:
                     def fetchone(self_inner):
-                        return ("group1", "dbo.Train", "dbo.Score", 1)
+                        return ("group1", "dbo.Train", "dbo.Score", 1, "dbo.Results")
                 return R()
             if "FROM dbo.ModelRegistry" in sql_txt:
                 class R:
