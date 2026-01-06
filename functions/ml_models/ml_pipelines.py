@@ -711,14 +711,22 @@ class PersistScoringResultsStep:
 
         # add metadata columns to the scored dataframe
         scored_df["SystemEventId"] = system_event_id
-        scored_df["ScoredAt"] = datetime.now(timezone.utc)
+        scored_df["ScoredAtUtc"] = datetime.now(timezone.utc)
         scored_df["ModelGroupKey"] = model_group_key
     
         # schema check: ensure the scored_df columns match the expected schema in the results table
         target_schema = sql_client.get_schema(
         table_name=results_table_name
         )
-        validate_transformed_data(transformed_data=scored_df, target_schema=target_schema)
+
+        # convert the schema to a richer dictionary keyed by column name (accepted by validate_transformed_data )
+        schema_dict = {
+            "columns": [col["column_name"] for col in target_schema],
+            "data_types": {col["column_name"]: col["data_type"] for col in target_schema},
+            "required": {col["column_name"]: bool(col["is_required"]) for col in target_schema},
+        }
+
+        validate_transformed_data(transformed_data=scored_df, target_schema=schema_dict)
 
         try:
             sql_client.write_dataframe_to_table(

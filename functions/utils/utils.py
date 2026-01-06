@@ -164,80 +164,115 @@ def normalize_dataframe_dtypes(
     *,
     numeric_parse_threshold: float = 0.95,
     max_categories: int = 50,
+    category_ratio_threshold: float = 0.5,
+    date_sample_size: int = 20,
 ) -> pd.DataFrame:
     """
-    Normalize a DataFrame's dtypes after loading from external sources (e.g. SQL).
+    Normalize DataFrame dtypes after loading from sources like SQL/CSV so downstream
+    code (ML, feature engineering, persistence) behaves predictably.
 
-    Why this exists:
-    - SQL DECIMAL columns often arrive in Python as `decimal.Decimal`, which forces
-      pandas to use dtype=object. Many ML libs expect numeric dtypes.
-    - Some connectors also return numeric values as strings.
+    Why this is necessary
+    ---------------------
+    Real-world connectors often produce “technically valid” but awkward pandas dtypes:
 
-    Strategy (generic, model-agnostic):
-    - Convert pandas extension dtypes where possible (`convert_dtypes`).
-    - For object/string columns:
-      - If values are mostly numeric-like, coerce to float.
-      - Else if low-cardinality, coerce to `category`.
-      - Else keep as pandas `string` dtype (not object).
-    Accepts:
-    - A pandas DataFrame
-    - A numeric_parse_threshold
-    - A max_categories
-    Returns:
-    - A pandas DataFrame with the dtypes normalized
-    Raises:
-    - ValueError if df is not a pandas DataFrame
+    - SQL DECIMAL frequently arrives as Python `decimal.Decimal` objects -> pandas uses
+      dtype=object, which breaks many ML libraries and makes math/aggregations slower.
+    - Numbers may arrive as strings (e.g., "12.34") depending on the source.
+    - Text columns sometimes arrive as dtype=object; we prefer pandas' `string` dtype.
+    - Low-cardinality label columns (team names, countries, enums) can be stored as
+      `category` to reduce memory and speed up groupby/filter operations.
+
+    What this function does
+    -----------------------
+    1) Converts to pandas extension dtypes where possible (convert_dtypes).
+    2) For object/string columns, applies this decision order:
+       a) If values are numeric-like -> convert to Float64
+       b) If values are date-like -> convert to datetime64[ns]
+       c) If low-cardinality labels -> convert to category
+       d) Otherwise -> keep as pandas string dtype
+
     """
-    # Check if the dataframe is valid
     if df is None or not isinstance(df, pd.DataFrame):
         raise ValueError("df must be a pandas DataFrame")
-
-    # Check if the dataframe is empty
     if df.empty:
         return df
 
-    # Copy the dataframe
-    out = df.copy()
-    # Convert the dtypes of the dataframe
-    out = out.convert_dtypes()
+    out = df.copy().convert_dtypes()
     n_rows = len(out)
 
-    # Iterate over the columns of the dataframe
-    for col in out.columns:
-        s = out[col]
+    # ---------- helper functions for normalization ----------
+    def is_object_or_string(series: pd.Series) -> bool:
+        return pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)
 
-        # Check if the column is an object or string dtype and if not, continue to the next column
-        if not (pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s)):
+    def is_decimalish(series: pd.Series) -> bool:
+        # All non-nulls are numeric Python objects (Decimal/int/float)
+        non_null = series.dropna()
+        if non_null.empty:
+            return False
+        return non_null.map(lambda v: isinstance(v, (Decimal, int, float))).all()
+
+    def is_dateish(series: pd.Series) -> bool:
+        # Already datetime is date-ish.
+        if pd.api.types.is_datetime64_any_dtype(series):
+            return True
+
+        non_null = series.dropna()
+        if non_null.empty:
+            return False
+
+        sample = non_null.head(min(date_sample_size, len(non_null)))
+        return sample.map(lambda v: isinstance(v, (date, datetime))).all()
+
+    def can_parse_numeric(series: pd.Series) -> tuple[bool, pd.Series]:
+        # Parse from string, see what fraction becomes numeric.
+        s_str = series.astype("string").str.strip().replace({"": pd.NA})
+        s_num = pd.to_numeric(s_str, errors="coerce")
+        ratio = float(s_num.notna().mean())
+        return (ratio >= numeric_parse_threshold and s_num.notna().any(), s_num)
+
+    def is_low_cardinality(series: pd.Series) -> bool:
+        non_null = series.dropna()
+        if non_null.empty:
+            return False
+        nunique = int(non_null.nunique())
+        if nunique == 0 or nunique > max_categories:
+            return False
+        return (nunique / max(n_rows, 1)) <= category_ratio_threshold
+
+    # ---------- main normalization loop ----------
+    for col in out.columns:
+        string = out[col]
+
+        # Only normalize text/object-like columns. Numeric/datetime dtypes are already fine.
+        if not is_object_or_string(string):
             continue
 
-        # Fast path: SQL DECIMAL often arrives as Decimal objects -> cast to float.
-        non_null = s.dropna()
-        if not non_null.empty:
-            # Check if every non-null is a Decimal (or int/float), if so, cast to float
-            if non_null.map(lambda v: isinstance(v, (Decimal, int, float))).all():
-                out[col] = pd.to_numeric(s, errors="coerce").astype("Float64")
-                continue
+        # 1) SQL DECIMAL -> Float64
+        if is_decimalish(string):
+            out[col] = pd.to_numeric(string, errors="coerce").astype("Float64")
+            continue
 
-        # Cast the column to a string dtype and strip the whitespace and replace empty strings with NA
-        s_str = s.astype("string").str.strip().replace({"": pd.NA})
-        s_num = pd.to_numeric(s_str, errors="coerce")
+        # 2) Date-like python objects -> datetime64[ns]
+        if is_dateish(string):
+            out[col] = pd.to_datetime(string, errors="coerce")
+            continue
 
-        non_na_ratio = float(s_num.notna().mean())
-        if non_na_ratio >= numeric_parse_threshold and s_num.notna().any():
+        # 3) Numeric-looking strings -> Float64
+        numeric_ok, s_num = can_parse_numeric(string)
+        if numeric_ok:
             out[col] = s_num.astype("Float64")
             continue
 
-        # Low-cardinality -> category
-        # (Use nunique on original values, not stringified, to preserve semantics.)
-        nunique = int(non_null.nunique()) if not non_null.empty else 0
-        if nunique > 0 and nunique <= max_categories and (nunique / max(n_rows, 1)) <= 0.5:
-            out[col] = s.astype("category")
+        # 4) Low-cardinality label columns -> category
+        if is_low_cardinality(string):
+            out[col] = string.astype("category")
             continue
 
-        # Otherwise keep as string dtype (avoid raw object)
-        out[col] = s_str
+        # 5) Default: keep as pandas string dtype
+        out[col] = string.astype("string").str.strip().replace({"": pd.NA})
 
     return out
+
     
 def roll_mean(series: pd.Series, window: int) -> pd.Series:
     """

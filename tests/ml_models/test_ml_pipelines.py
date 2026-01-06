@@ -377,15 +377,27 @@ def test_persist_scoring_results_step_adds_metadata_validates_and_writes(monkeyp
     class FakeSqlClient:
         def get_schema(self, *, table_name: str):
             captured["schema_table"] = table_name
-            # validate_transformed_data is mocked; schema content doesn't matter here
-            return [{"column_name": "ID"}]
+            # Must match the real SqlClient.get_schema() contract, as the step builds a schema_dict
+            # from these keys.
+            return [
+                {"column_name": "ID", "data_type": "int", "is_required": True},
+                {"column_name": "m1", "data_type": "float", "is_required": False},
+                {"column_name": "SystemEventId", "data_type": "nvarchar", "is_required": True},
+                {"column_name": "ScoredAtUtc", "data_type": "datetimeoffset", "is_required": True},
+                {"column_name": "ModelGroupKey", "data_type": "nvarchar", "is_required": True},
+            ]
 
         def write_dataframe_to_table(self, *, df, table_name: str, if_exists: str = "append"):
             captured["df"] = df.copy()
             captured["table_name"] = table_name
             captured["if_exists"] = if_exists
 
-    monkeypatch.setattr(pipes, "validate_transformed_data", lambda *, transformed_data, target_schema: captured.setdefault("validated", True))
+    def fake_validate_transformed_data(*, transformed_data, target_schema):
+        captured["validated"] = True
+        captured["validated_df"] = transformed_data
+        captured["validated_schema"] = target_schema
+
+    monkeypatch.setattr(pipes, "validate_transformed_data", fake_validate_transformed_data)
 
     scored_df = pd.DataFrame({"ID": [1, 2], "m1": [0.1, 0.2]}).set_index(["ID"], drop=False)
     ctx = {
@@ -398,11 +410,32 @@ def test_persist_scoring_results_step_adds_metadata_validates_and_writes(monkeyp
 
     out = pipes.PersistScoringResultsStep()(ctx)
     assert out["status"] == "persisted"
+    assert captured["schema_table"] == "dbo.Results"
     assert captured["table_name"] == "dbo.Results"
     assert captured["if_exists"] == "append"
     df = captured["df"]
     assert "SystemEventId" in df.columns
-    assert "ScoredAt" in df.columns
+    assert "ScoredAtUtc" in df.columns
     assert "ModelGroupKey" in df.columns
     assert captured.get("validated") is True
+
+    # validate_transformed_data receives the mutated scored_df + a richer schema dict
+    assert captured["validated_df"] is ctx["scored_df"]
+    assert captured["validated_schema"] == {
+        "columns": ["ID", "m1", "SystemEventId", "ScoredAtUtc", "ModelGroupKey"],
+        "data_types": {
+            "ID": "int",
+            "m1": "float",
+            "SystemEventId": "nvarchar",
+            "ScoredAtUtc": "datetimeoffset",
+            "ModelGroupKey": "nvarchar",
+        },
+        "required": {
+            "ID": True,
+            "m1": False,
+            "SystemEventId": True,
+            "ScoredAtUtc": True,
+            "ModelGroupKey": True,
+        },
+    }
 

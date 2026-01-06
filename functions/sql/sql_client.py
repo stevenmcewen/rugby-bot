@@ -95,11 +95,13 @@ class SqlClient:
             logger.error("SQL connection failed after %s attempts", max_attempts)
             raise last_exc
 
+        # fast_executemany is set to False to avoid the issue of the SQL Server automatically setting incorrect string max lengths,
+        # resulting in buffer overflow errors.
         self.engine = sa.create_engine(
             "mssql+pyodbc://",
             creator=_get_connection,
             pool_pre_ping=True,
-            fast_executemany=True,
+            fast_executemany=False,
         )
 
         logger.info(
@@ -661,6 +663,8 @@ class SqlClient:
         params: dict[str, object] = {}
         ## build the where clause based on the filters provided
         if table_name is not None:
+            if "." in table_name:
+                schema, table_name = table_name.split(".", 1)
             where_clauses.append("st.table_name = :table_name")
             params["table_name"] = table_name
 
