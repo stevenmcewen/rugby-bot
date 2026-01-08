@@ -1,8 +1,6 @@
 ## Rugby Betting Intelligence Bot
 
 A cloud-native machine learning system for analysing rugby match data and generating match predictions.  
-This project is designed as a long-term software engineering exercise, following real-world patterns, clean architecture, and Azure serverless best practices.
-
 ---
 
 ## Project Overview
@@ -18,6 +16,31 @@ The Rugby Intelligence Bot:
 The architecture is designed to be maintainable, scalable, and production-ready.
 
 ---
+
+# Design Pattern
+This application was designed from the perspective of making any future adjustments as seemless as possible. 
+This required the approach of maximising the seperation of each component, independantly generating each step and automatically orchestrating
+the independantly generated steps all with one uniform metadata tracking system to record the outcomes of eachstep and pass the required parameters
+into the system steps where needed.
+Thus, the system at each level was designed with an orchestration, pipeline and factory design philosophy.
+
+At the highest level (function_app.py) each of the core systems required by the application are seperated into their own functions i.e.
+1. Ingest (one function per source) automated to earliest in the morning.
+2. Preprocess. Preprocess all the ingested sources that completed in the morning.
+3. Model training (once per week after preprocessing), train on all existing preprocessed data.
+4. Model Scoring (every morning after preprocessing), scores the preprocessed data on the latest trained model.
+5. Notifications (last process every morning), inform us of the preditions from model scoring.
+
+At each step, the output of a function is stored in allocated sql tables ready to be ingested by the next function, finishing that functions action for the day.
+This fundamentally means that no one function is directly speaking to another function, the interface between each function is the SQL database.
+This allows as many changes as possible to each function completely independantly of another so long as the sql database interfacing both functions remains consistent.
+
+This design pattern principality leaks into each stage of the design
+1. An orchestrator that orchestrates steps.
+2. Independant steps that communicate with an orchestration level context. Steps which are made from repeatable step specific helpers or generalized utility helpers.
+3. A Factory method that builds out the orchestration based on the steps assigned to the blueprint being called.
+
+This allows us to implement variations of blueprints with new steps and variations of existing steps without having to interact with the overall orchestration flow or any existing working factory blueprints.
 
 # Infrastructure Overview
 
@@ -86,44 +109,12 @@ The goal is to treat the database not just as storage, but also as the “contro
 To coordinate work between ingestion, preprocessing, and other functions, the system uses a small hierarchy of SQL tables:
 
 - `dbo.system_events`: **high-level function lifecycle tracking**
-  - One row per function execution (e.g. `IngestRugby365ResultsFunction`, `BuildFeatureTablesFunction`).
-  - Key columns:
-    - `id` (`UNIQUEIDENTIFIER`, PK) – event ID.
-    - `function_name` – name of the Azure Function.
-    - `trigger_type` – e.g. `http`, `timer`, `queue`.
-    - `event_type` – semantic label, e.g. `ingestion`, `preprocessing`.
-    - `status` – e.g. `started`, `succeeded`, `failed`.
-    - `started_at`, `completed_at`, `created_at` – UTC timestamps.
 
 - `dbo.ingestion_events`: **detailed ingestion file / batch tracking**
-  - Used both for logging and as orchestration metadata between ingestion and preprocessing.
-  - Key columns:
-    - `id` (`UNIQUEIDENTIFIER`, PK).
-    - `batch_id` – groups related ingestion events in a single run.
-    - `system_event_id` – optional FK → `system_events.id` to tie back to the parent function invocation.
-    - `integration_type` – e.g. `historical_results`, `rugby365_results`, `rugby365_fixtures`.
-    - `integration_provider` – e.g. `kaggle`, `rugby365`.
-    - `container_name`, `blob_path` – where the raw file lives in Blob Storage.
-    - `status` – lifecycle of the file/batch, e.g. `ingested`, `preprocessing`, `preprocessed`, `failed`.
-    - `error_message` – optional error details.
-    - `created_at`, `updated_at` – UTC timestamps.
 
 - `dbo.preprocessing_events`: **planned preprocessing work tracking**
-  - Represents the “work orders” for turning raw ingestion outputs into cleaned / model-ready tables.
-  - Typically created from `preprocessing_plans` in the code and used to coordinate downstream preprocessing jobs.
-  - Key columns:
-    - `id` (`UNIQUEIDENTIFIER`, PK).
-    - `batch_id` – links preprocessing work back to the same logical batch as ingestion.
-    - `system_event_id` – FK → `system_events.id` to tie the preprocessing run to a function execution.
-    - `integration_type`, `integration_provider` – describe which logical integration this preprocessing relates to (e.g. same values used in `ingestion_events`).
-    - `container_name`, `blob_path` – where the input data for this preprocessing step lives.
-    - `target_table` – the logical/physical table that this preprocessing step will write to.
-    - `pipeline_name` – the name of the Python pipeline or function that will execute the preprocessing.
-    - `status` – lifecycle of the preprocessing job, e.g. `started`, `running`, `succeeded`, `failed`.
-    - `error_message` – optional error details.
-    - `created_at`, `updated_at` – UTC timestamps.
 
-Ingestion functions insert rows into `ingestion_events` (and optionally `system_events`) when raw files are written to Blob.  
+Ingestion functions insert rows into `ingestion_events` (and `system_events`) when raw files are written to Blob.  
 Preprocessing functions then:
 
 1. Create corresponding rows in `preprocessing_events` for each planned preprocessing job.
@@ -138,13 +129,6 @@ Beyond tracking *events*, the system also stores **schema metadata** so that pip
 - `dbo.preprocessing_source_target_mappings`: **logical mapping from sources to preprocessing pipelines and targets**
   - Maps a `(source_provider, source_type)` pair to a target table and pipeline implementation.
   - Used by preprocessing orchestration to answer: “Given this ingested source (e.g. `kaggle` + `historical_results`), which preprocessing pipeline should run, and where should the data land?”
-  - Key columns:
-    - `id` (`INT`, identity PK).
-    - `source_provider` – e.g. `kaggle`, `rugby365`.
-    - `source_type` – e.g. `historical`, `fixtures`, `results`.
-    - `target_table` – e.g. `dbo.rugby_results_clean`.
-    - `pipeline_name` – the Python pipeline/function name to execute.
-    - `created_at` – UTC timestamp.
 
 - `dbo.schema_tables`: **catalogue of logical tables**
   - One row per logical table in the system (source or target, or sometimes both).
@@ -152,28 +136,10 @@ Beyond tracking *events*, the system also stores **schema metadata** so that pip
     - Some rows may only have `integration_type` / `integration_provider` filled (for unnamed source “shapes”).
     - Others may only have `table_name` filled (for concrete target tables).
     - Some may use both when the same logical table acts as both source and target in different stages.
-  - Key columns:
-    - `id` (`UNIQUEIDENTIFIER`, PK).
-    - `table_name` – optional physical table name in SQL, e.g. `dbo.rugby_results_clean`.
-    - `integration_type`, `integration_provider` – optional metadata for connecting this schema to a particular integration.
-    - `description` – optional human-readable description.
-    - `is_active` – flag to mark deprecated schemas.
-    - `created_at`, `updated_at` – UTC timestamps.
 
 - `dbo.schema_columns`: **column-level schema definition**
   - One row per column belonging to a row in `schema_tables`.
   - Used to describe the expected structure of a table or file, and to drive validation / transformation logic.
-  - Key columns:
-    - `id` (`UNIQUEIDENTIFIER`, PK).
-    - `table_id` – FK → `schema_tables.id`.
-    - `column_name` – logical/physical column name.
-    - `data_type` – logical type description used by the runtime validator (`matches_type` in `functions/utils/utils.py`).
-      - Currently supported logical types: `string`, `int`, `bool`, `date`, `datetime`.
-      - Note: CSV inputs commonly arrive as `object` dtype; for `date`/`datetime` we accept object/string dtypes and parse/normalise later in preprocessing.
-    - `is_required` – whether this field is mandatory in the schema.
-    - `ordinal_position` – optional column order.
-    - `max_length`, `numeric_precision`, `numeric_scale` – optional extra metadata for lengths/precision.
-    - `created_at`, `updated_at` – UTC timestamps.
 
 Together, these metadata tables allow the platform to:
 
@@ -189,18 +155,6 @@ Role: `Key Vault Secrets User`
 Principal: The Function App system-assigned identity
 
 Secrets are retrieved at runtime using the Azure SDK for Python (`DefaultAzureCredential` + `SecretClient`).
-
-### Configuration and Secret Management Philosophy
-
-The configuration system (`AppSettings` and helpers in `functions/config/settings.py`) is designed to answer one question cleanly:  
-**“How do we keep the same code running in multiple environments (local, dev, prod) without ever hard‑coding secrets?”**
-
-- **Single source of truth for settings**: application code asks for a strongly-typed `AppSettings` object instead of reading environment variables everywhere.
-- **Key Vault first, environment as a safety net**: sensitive values (SQL server name, database name, storage connection, raw data container, Kaggle dataset) are expected to live in Key Vault, but can fall back to environment variables for local development or emergency overrides.
-- **Same pattern everywhere**: ingestion, preprocessing, SQL access, and notifications all depend on `get_settings()`, so switching environments is a matter of changing Key Vault + app settings, not changing code.
-- **Supports 12‑factor style deployment**: configuration is externalised, secrets are centralised, and rotating a secret is an operational change, not a code change.
-
-Together with managed identity, this means the system is secure by default (no passwords in code), yet still easy to run locally and easy to reason about at a high level.
 
 ---
 
@@ -314,15 +268,22 @@ rugby-bot/
     │   └── integration_services.py     # ingestion orchestration
     ├── data_preprocessing/
     │   ├── __init__.py
-    │   ├── preprocessing_helpers.py      # Helper functions for fine grained preprocessing actions
-    │   ├── preprocessing_pipelines.py    # preprocessing function selection and orchestration  
-    │   └── preprocessing_services.py     # preprocessor orchestration
+    │   ├── preprocessing_helpers.py    # Helper functions for fine grained preprocessing actions
+    │   ├── preprocessing_pipelines.py  # preprocessing function selection and orchestration  
+    │   └── preprocessing_services.py   # preprocessor orchestration
     ├── logging/
     │   ├── __init__.py
     │   └── logger.py                   # get_logger() and logging helpers
     ├── ml_models/
     │   ├── __init__.py
-    │   └── services.py                 # Training and scoring logic
+    │   ├── ml_orchestrator.py
+    │   ├── ml_pipelines.py
+    │   └── helpers/
+    │        ├── ml_scoring_helpers.py
+    │        ├── ml_training_helpers.py
+    │        ├── ml_utils.py
+    │        ├── model_factory.py
+    │        └── trainer_factory.py
     ├── notifications/
     │   ├── __init__.py
     │   └── services.py                 # Prediction summary + email sending
