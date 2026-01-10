@@ -11,10 +11,7 @@ from functions.data_ingestion.integration_services import (
 from functions.data_preprocessing.preprocessing_services import orchestrate_preprocessing
 from functions.logging.logger import get_logger
 from functions.ml_models.ml_orchestrator import orchestrate_model_training, orchestrate_model_scoring
-from functions.notifications.services import (
-    generate_weekend_predictions,
-    send_prediction_email,
-)
+from functions.notifications.services import (generate_daily_predictions,send_prediction_email)
 
 app = func.FunctionApp()
 
@@ -268,6 +265,36 @@ def ScoreUpcomingInternationalRugbyFixturesFunction(timer: func.TimerRequest) ->
             details=str(exc),
         )
         raise
+
+def DailyPredictionsNotificationFunction(timer: func.TimerRequest) -> None:
+    """
+    Generate and send daily predictions notification email.
+    """
+    logger.info("DailyPredictionsNotificationFunction triggered.")
+    system_event = sql_client.start_system_event(
+        function_name="DailyPredictionsNotificationFunction",
+        trigger_type="timer",
+        event_type="notification",
+    )
+    try:
+        # Generate daily predictions summary
+        daily_predictions_payload = generate_daily_predictions(sql_client=sql_client)
+        # Send the email notification
+        send_prediction_email(payload=daily_predictions_payload)
+        # log success
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc: 
+        logger.exception("DailyPredictionsNotificationFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
+
 
 # #------------------------------------------------------------------------------------------------
 # # Testing functions

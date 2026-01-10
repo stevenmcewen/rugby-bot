@@ -30,6 +30,17 @@ class AppSettings:
 
     enable_scheduled_functions: bool = False
 
+    # notifications / email (optional)
+    email_from: str | None = None
+    email_to: str | None = None  # comma/semicolon-separated list
+    email_subject_prefix: str | None = None
+
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
+
 ### key vault helpers ###
 @lru_cache()
 def get_key_vault_client() -> SecretClient:
@@ -97,6 +108,27 @@ def get_settings() -> AppSettings:
 
     kaggle_dataset = get_secret(secret_name="KAGGLE-DATASET")
 
+    # Email/SMTP settings (optional; if missing, notifications can no-op)
+    email_from = get_secret(secret_name="EMAIL-FROM", default_env_var="EMAIL_FROM")
+    email_to = get_secret(secret_name="EMAIL-TO", default_env_var="EMAIL_TO")
+    email_subject_prefix = get_secret(
+        secret_name="EMAIL-SUBJECT-PREFIX", default_env_var="EMAIL_SUBJECT_PREFIX"
+    )
+
+    smtp_host = get_secret(secret_name="SMTP-HOST", default_env_var="SMTP_HOST")
+    smtp_port_raw = get_secret(secret_name="SMTP-PORT", default_env_var="SMTP_PORT")
+    try:
+        smtp_port = int(smtp_port_raw) if smtp_port_raw else None
+    except ValueError:
+        logger.error("Invalid SMTP port value: %r", smtp_port_raw)
+        smtp_port = None
+
+    smtp_username = get_secret(secret_name="SMTP-USERNAME", default_env_var="SMTP_USERNAME")
+    smtp_password = get_secret(secret_name="SMTP-PASSWORD", default_env_var="SMTP_PASSWORD")
+
+    smtp_use_tls_raw = get_secret(secret_name="SMTP-USE-TLS", default_env_var="SMTP_USE_TLS")
+    smtp_use_tls = (smtp_use_tls_raw or "true").lower() == "true"
+
 
     return AppSettings(
         environment=environment,
@@ -107,6 +139,14 @@ def get_settings() -> AppSettings:
         artifact_container_name=artifact_container_name,
         enable_scheduled_functions=enable_scheduled_functions,
         kaggle_dataset=kaggle_dataset,
+        email_from=email_from,
+        email_to=email_to,
+        email_subject_prefix=email_subject_prefix,
+        smtp_host=smtp_host,
+        smtp_port=smtp_port,
+        smtp_username=smtp_username,
+        smtp_password=smtp_password,
+        smtp_use_tls=smtp_use_tls,
     )
 
 
