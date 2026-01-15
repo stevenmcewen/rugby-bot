@@ -260,6 +260,7 @@ rugby-bot/
 ├── function_app.py                     # Azure Functions entrypoint / wiring
 ├── local testing notebooks/            # Local experimentation / diagnostics
 │   └── local_ingest_historical_results_test.ipynb
+├── tests/                              # Unit tests (one unit test file per module) 
 │
 └── functions/                          # Application modules (reusable logic)
     ├── config/
@@ -290,6 +291,7 @@ rugby-bot/
     ├── notifications/
     │   ├── __init__.py
     │   └── services.py                 # Prediction summary + email sending
+    │   └── notification_services_helpers.py    # Helper functions for Prediction summary + email sending
     ├── sql/
     │   ├── __init__.py
     │   └── sql_client.py               # Centralised SQL access layer (Managed Identity)
