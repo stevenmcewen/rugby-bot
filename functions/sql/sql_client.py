@@ -1282,8 +1282,8 @@ class SqlClient:
         """
         try:
             with self.engine.connect() as conn:
-                result = conn.execute(sa.text("SELECT * FROM dbo.ModelScoredTables"))
-                rows = result.fetchall()
+                result = conn.execute(sa.text("SELECT * FROM dbo.ModelScoredTableDetails"))
+                rows = result.mappings().all()
                 return rows
         except Exception as e:
             logger.error("Error getting model scored table details: %s", e)

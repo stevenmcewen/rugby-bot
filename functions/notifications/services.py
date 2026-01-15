@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import datetime
-import smtplib
-from email.message import EmailMessage
 
+from azure.communication.email import EmailClient
 from functions.config.settings import get_settings
 from functions.logging.logger import get_logger
 from functions.sql.sql_client import SqlClient
@@ -54,7 +53,7 @@ def get_daily_predictions(sql_client: SqlClient) -> dict:
                     home_team_win_prob_col,
                     point_diff_col
                 ],
-                where_sql=date_filter
+                where_sql=date_filter,
             )
 
             # rename columns to standard names
@@ -105,46 +104,49 @@ def send_prediction_email(payload: dict | str) -> None:
     if not any_rows:
         logger.info("There were no predictions today so no email will be sent")
         return
-    else:
-        # 3) Get email routing information
-        from_address = settings.email_from
-        to_addresses = parse_recipients(settings.email_to)
-        smtp_host = settings.smtp_host
-        smtp_port = settings.smtp_port or 25
 
-        if not from_address or not to_addresses:
-            logger.warning("Email not sent: missing EMAIL_FROM and/or EMAIL_TO configuration.")
-            return
-        if not smtp_host:
-            logger.warning("Email not sent: missing SMTP_HOST/SMTP-HOST configuration.")
-            return
+    # 3) Get email routing information
+    from_address = settings.email_from
+    to_addresses = parse_recipients(settings.email_to)
+    conn_str = settings.acs_email_connection_string
 
-        logger.info(
-            "Sending prediction email subject=%r from=%r to=%r",
-            subject,
-            from_address,
-            to_addresses,
-        )
+    if not from_address or not to_addresses:
+        logger.warning("Email not sent: missing EMAIL_FROM and/or EMAIL_TO configuration.")
+        return
+    if not conn_str:
+        logger.warning("Email not sent: missing ACS_EMAIL_CONNECTION_STRING configuration.")
+        return
 
-        # 4) Create an email object with all data we have extracted from payload
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = from_address
-        msg["To"] = ", ".join(to_addresses)
-        msg.set_content(text_body)
-        msg.add_alternative(html_body, subtype="html")
+    logger.info(
+        "Sending prediction email from=%r to=%r",
+        from_address,
+        to_addresses,
+    )
 
-        # 5) Send Email object via SMTP
-        try:
-            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
-                if settings.smtp_use_tls:
-                    server.starttls()
-                if settings.smtp_username and settings.smtp_password:
-                    server.login(settings.smtp_username, settings.smtp_password)
-                server.send_message(msg)
-        except Exception as exc:
-            logger.exception("Failed to send prediction email: %s", exc)
-            raise
+    # 4) Build ACS message payload
+    message = {
+        "senderAddress": from_address,
+        "recipients": {"to": [{"address": addr} for addr in to_addresses]},
+        "content": {
+            "subject": subject,
+            "plainText": text_body,
+            "html": html_body,
+        },
+    }
+
+    #  5) Send via ACS SDK
+    try:
+        client = EmailClient.from_connection_string(conn_str)
+        poller = client.begin_send(message)
+        result = poller.result()
+
+        # result is a dictionary with 'id' key containing the message_id
+        message_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+        logger.info("Prediction email sent via ACS. message_id=%s", message_id)
+
+    except Exception as exc:
+        logger.exception("Failed to send prediction email via ACS: %s", exc)
+        raise
 
 
 

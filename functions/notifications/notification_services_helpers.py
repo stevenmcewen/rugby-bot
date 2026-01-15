@@ -18,11 +18,11 @@ def parse_payload(payload: dict | str) -> dict:
 
 def parse_recipients(value: str | None) -> list[str]:
     "create a list of all recipient addresses from a string value, seperating on , and ;"
-    if not value:
-        recipient_list = []
+    if not value or value.strip() == "":
+        return []
     parts = re.split(r"[;,]", value)
     # make sure that the strings dont have any leading or trailing whitespaces in the list 
-    recipient_list =  [p.strip() for p in parts if p.strip()]
+    recipient_list = [p.strip() for p in parts if p.strip()]
     return recipient_list
 
 
@@ -43,8 +43,7 @@ def build_email_bodies(payload_dict: dict) -> tuple[str, str, str, bool]:
     date = payload_dict.get("date") or ""
     predictions = payload_dict.get("predictions") or {}
 
-    # Subject line can be altered in key vault
-    subject_prefix = (settings.email_subject_prefix or "Rugby Bot").strip()
+    subject_prefix = "Stevens Rugby Predictions"
     subject = f"{subject_prefix}: daily predictions ({date})" if date else f"{subject_prefix}: daily predictions"
 
     # Build HTML

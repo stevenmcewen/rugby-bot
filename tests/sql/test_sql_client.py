@@ -1113,3 +1113,66 @@ def test_get_next_artifact_version_returns_scalar(monkeypatch):
     monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
 
     assert client.get_next_artifact_version(model_key="m1") == 5
+
+
+def test_get_model_scored_table_details_success(monkeypatch):
+    """Test successful retrieval of model scored table details"""
+    mock_rows = [
+        {
+            "table_name": "nrl_predictions",
+            "competition_col": "comp",
+            "home_team_col": "home",
+            "away_team_col": "away",
+            "home_team_win_prob_col": "win_prob",
+            "point_diff_col": "diff"
+        }
+    ]
+
+    class MappingsResult:
+        def all(self):
+            return mock_rows
+
+    class Result:
+        def mappings(self):
+            return MappingsResult()
+
+    class Conn:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, sql):
+            return Result()
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = Engine()
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    result = client.get_model_scored_table_details()
+    assert result == mock_rows
+
+
+def test_get_model_scored_table_details_error(monkeypatch):
+    """Test that database errors are raised"""
+    class Conn:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, sql):
+            raise RuntimeError("Database error")
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    client = sql_mod.SqlClient.__new__(sql_mod.SqlClient)
+    client.engine = Engine()
+    monkeypatch.setattr(sql_mod.sa, "text", lambda sql: sql)
+
+    with pytest.raises(RuntimeError):
+        client.get_model_scored_table_details()

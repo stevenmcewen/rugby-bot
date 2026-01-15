@@ -11,7 +11,7 @@ from functions.data_ingestion.integration_services import (
 from functions.data_preprocessing.preprocessing_services import orchestrate_preprocessing
 from functions.logging.logger import get_logger
 from functions.ml_models.ml_orchestrator import orchestrate_model_training, orchestrate_model_scoring
-from functions.notifications.services import (generate_daily_predictions,send_prediction_email)
+from functions.notifications.services import (get_daily_predictions, send_prediction_email)
 
 app = func.FunctionApp()
 
@@ -230,7 +230,7 @@ def TrainInternationalRugbyFixturesModelFunction(timer: func.TimerRequest) -> No
         raise
 
 @app.schedule(
-    schedule="0 0 6 * * *", # 06:00 UTC daily
+    schedule="0 0 9 * * *", # 09:00 UTC daily
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
@@ -266,6 +266,12 @@ def ScoreUpcomingInternationalRugbyFixturesFunction(timer: func.TimerRequest) ->
         )
         raise
 
+@app.schedule(
+    schedule="0 0 10 * * *", # 10:00 UTC daily
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
 def DailyPredictionsNotificationFunction(timer: func.TimerRequest) -> None:
     """
     Generate and send daily predictions notification email.
@@ -278,7 +284,7 @@ def DailyPredictionsNotificationFunction(timer: func.TimerRequest) -> None:
     )
     try:
         # Generate daily predictions summary
-        daily_predictions_payload = generate_daily_predictions(sql_client=sql_client)
+        daily_predictions_payload = get_daily_predictions(sql_client=sql_client)
         # Send the email notification
         send_prediction_email(payload=daily_predictions_payload)
         # log success
@@ -564,3 +570,55 @@ def DailyPredictionsNotificationFunction(timer: func.TimerRequest) -> None:
 #             mimetype="application/json",
 #         )
 #         raise
+# # Daily predictions notification test.
+# @app.route(route="DailyPredictionsNotificationFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
+# def DailyPredictionsNotificationFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
+#     """
+#     Generate and send daily predictions notification email.
+#     """
+#     logger.info("DailyPredictionsNotificationFunctionTest triggered.")
+#     system_event = sql_client.start_system_event(
+#         function_name="DailyPredictionsNotificationFunctionTest",
+#         trigger_type="test",
+#         event_type="notification",
+#     )
+#     try:
+#         # Generate daily predictions summary
+#         daily_predictions_payload = get_daily_predictions(sql_client=sql_client)
+#         # Send the email notification
+#         send_prediction_email(payload=daily_predictions_payload)
+#         # log success
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="succeeded",
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "ok",
+#                     "message": "DailyPredictionsNotificationFunctionTest triggered",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=200,
+#             mimetype="application/json",
+#         )
+#     except Exception as exc: 
+#         logger.exception("DailyPredictionsNotificationFunctionTest failed.")
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="failed",
+#             details=str(exc),
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "error",
+#                     "message": "DailyPredictionsNotificationFunctionTest failed",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=500,
+#             mimetype="application/json",
+#         )
+#         raise  
