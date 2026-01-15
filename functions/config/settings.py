@@ -30,6 +30,11 @@ class AppSettings:
 
     enable_scheduled_functions: bool = False
 
+    email_from: str | None = None
+    email_to: str | None = None
+    acs_email_connection_string: str | None = None
+
+
 ### key vault helpers ###
 @lru_cache()
 def get_key_vault_client() -> SecretClient:
@@ -97,6 +102,12 @@ def get_settings() -> AppSettings:
 
     kaggle_dataset = get_secret(secret_name="KAGGLE-DATASET")
 
+    # Email/SMTP settings
+    email_from = get_secret(secret_name="EMAIL-FROM")
+    email_to = get_secret(secret_name="EMAIL-TO")
+    acs_email_connection_string = get_secret(secret_name="ACS-EMAIL-CONNECTION-STRING")
+
+
 
     return AppSettings(
         environment=environment,
@@ -107,6 +118,10 @@ def get_settings() -> AppSettings:
         artifact_container_name=artifact_container_name,
         enable_scheduled_functions=enable_scheduled_functions,
         kaggle_dataset=kaggle_dataset,
+        email_from=email_from,
+        email_to=email_to,
+        acs_email_connection_string=acs_email_connection_string
+
     )
 
 

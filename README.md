@@ -61,6 +61,9 @@ rg-rugbybot-dev-zn
 | SQL Database | `sqldb-rugbybot-core-dev` | Stores match data, features, and results |
 | Key Vault | `kv-rugbybot-dev` | Secure secrets store |
 | Application Insights | `func-rugbybot-dev` | Application monitoring and telemetry |
+| Communication Service | `acs-rugbybot-email` | Communication service for sending emails |
+| Email Communication Service | `ecs-rugbybot-email` | Email communication service for sending emails |
+
 
 ---
 

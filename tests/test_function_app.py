@@ -251,3 +251,142 @@ def test_preprocess_data_timer_failure(monkeypatch):
     assert any(
         "preprocess failed" in (c.get("details") or "") for c in fake_sql.completed_events
     )
+
+
+# Does TrainInternationalRugbyFixturesModelFunction call orchestrate_model_training and complete the system event?
+# must call orchestrate_model_training with the correct parameters and mark the event as succeeded
+def test_train_international_rugby_fixtures_model_timer_success(monkeypatch):
+    fake_sql = _make_module_with_fake_sql_client(monkeypatch)
+
+    calls = {}
+
+    def fake_orchestrate_model_training(*, sql_client, system_event_id, pipeline_name, model_group_key):
+        calls["sql_client"] = sql_client
+        calls["system_event_id"] = system_event_id
+        calls["pipeline_name"] = pipeline_name
+        calls["model_group_key"] = model_group_key
+
+    monkeypatch.setattr(function_app, "orchestrate_model_training", fake_orchestrate_model_training)
+
+    result = function_app.TrainInternationalRugbyFixturesModelFunction(timer=object())
+
+    assert calls["sql_client"] is fake_sql
+    assert calls["pipeline_name"] == "default_model_training"
+    assert calls["model_group_key"] == "international_rugby_fixtures"
+    assert any(
+        c["system_event_id"] == calls["system_event_id"] and c["status"] == "succeeded"
+        for c in fake_sql.completed_events
+    )
+    assert result is None
+
+
+# Does TrainInternationalRugbyFixturesModelFunction handle training failures by marking the system event as failed and re-raising?
+# must set the system event status to failed, record the error details, and re-raise the original exception
+def test_train_international_rugby_fixtures_model_timer_failure(monkeypatch):
+    fake_sql = _make_module_with_fake_sql_client(monkeypatch)
+
+    def failing_orchestrate(*_args, **_kwargs):
+        raise RuntimeError("model training failed")
+
+    monkeypatch.setattr(function_app, "orchestrate_model_training", failing_orchestrate)
+
+    with pytest.raises(RuntimeError) as exc:
+        function_app.TrainInternationalRugbyFixturesModelFunction(timer=object())
+
+    assert "model training failed" in str(exc.value)
+    assert any(c["status"] == "failed" for c in fake_sql.completed_events)
+    assert any(
+        "model training failed" in (c.get("details") or "") for c in fake_sql.completed_events
+    )
+
+
+# Does ScoreUpcomingInternationalRugbyFixturesFunction call orchestrate_model_scoring and complete the system event?
+# must call orchestrate_model_scoring with the correct parameters and mark the event as succeeded
+def test_score_upcoming_international_rugby_fixtures_timer_success(monkeypatch):
+    fake_sql = _make_module_with_fake_sql_client(monkeypatch)
+
+    calls = {}
+
+    def fake_orchestrate_model_scoring(*, sql_client, system_event_id, pipeline_name, model_group_key):
+        calls["sql_client"] = sql_client
+        calls["system_event_id"] = system_event_id
+        calls["pipeline_name"] = pipeline_name
+        calls["model_group_key"] = model_group_key
+
+    monkeypatch.setattr(function_app, "orchestrate_model_scoring", fake_orchestrate_model_scoring)
+
+    result = function_app.ScoreUpcomingInternationalRugbyFixturesFunction(timer=object())
+
+    assert calls["sql_client"] is fake_sql
+    assert calls["pipeline_name"] == "default_model_scoring"
+    assert calls["model_group_key"] == "international_rugby_fixtures"
+    assert any(
+        c["system_event_id"] == calls["system_event_id"] and c["status"] == "succeeded"
+        for c in fake_sql.completed_events
+    )
+    assert result is None
+
+
+# Does ScoreUpcomingInternationalRugbyFixturesFunction handle scoring failures by marking the system event as failed and re-raising?
+# must set the system event status to failed, record the error details, and re-raise the original exception
+def test_score_upcoming_international_rugby_fixtures_timer_failure(monkeypatch):
+    fake_sql = _make_module_with_fake_sql_client(monkeypatch)
+
+    def failing_orchestrate(*_args, **_kwargs):
+        raise RuntimeError("model scoring failed")
+
+    monkeypatch.setattr(function_app, "orchestrate_model_scoring", failing_orchestrate)
+
+    with pytest.raises(RuntimeError) as exc:
+        function_app.ScoreUpcomingInternationalRugbyFixturesFunction(timer=object())
+
+    assert "model scoring failed" in str(exc.value)
+    assert any(c["status"] == "failed" for c in fake_sql.completed_events)
+    assert any(
+        "model scoring failed" in (c.get("details") or "") for c in fake_sql.completed_events
+    )
+
+
+# Does DailyPredictionsNotificationFunction call get_daily_predictions and send_prediction_email and complete the system event?
+# must call get_daily_predictions and send_prediction_email with the correct parameters and mark the event as succeeded
+def test_daily_predictions_notification_timer_success(monkeypatch):
+    fake_sql = _make_module_with_fake_sql_client(monkeypatch)
+
+    calls = {}
+
+    def fake_get_daily_predictions(*, sql_client):
+        calls["get_daily_predictions_sql_client"] = sql_client
+        return {"date": "2026-01-15", "predictions": {}}
+
+    def fake_send_prediction_email(*, payload):
+        calls["send_prediction_email_payload"] = payload
+
+    monkeypatch.setattr(function_app, "get_daily_predictions", fake_get_daily_predictions)
+    monkeypatch.setattr(function_app, "send_prediction_email", fake_send_prediction_email)
+
+    result = function_app.DailyPredictionsNotificationFunction(timer=object())
+
+    assert calls["get_daily_predictions_sql_client"] is fake_sql
+    assert calls["send_prediction_email_payload"] == {"date": "2026-01-15", "predictions": {}}
+    assert any(c["status"] == "succeeded" for c in fake_sql.completed_events)
+    assert result is None
+
+
+# Does DailyPredictionsNotificationFunction handle notification failures by marking the system event as failed and re-raising?
+# must set the system event status to failed, record the error details, and re-raise the original exception
+def test_daily_predictions_notification_timer_failure(monkeypatch):
+    fake_sql = _make_module_with_fake_sql_client(monkeypatch)
+
+    def failing_get_predictions(*_args, **_kwargs):
+        raise RuntimeError("predictions generation failed")
+
+    monkeypatch.setattr(function_app, "get_daily_predictions", failing_get_predictions)
+
+    with pytest.raises(RuntimeError) as exc:
+        function_app.DailyPredictionsNotificationFunction(timer=object())
+
+    assert "predictions generation failed" in str(exc.value)
+    assert any(c["status"] == "failed" for c in fake_sql.completed_events)
+    assert any(
+        "predictions generation failed" in (c.get("details") or "") for c in fake_sql.completed_events
+    )

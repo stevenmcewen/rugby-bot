@@ -1267,5 +1267,25 @@ class SqlClient:
         except Exception as e:
             logger.error("Error getting latest artifact for model_key='%s': %s", model_key, e)
             raise
-    
+        
+    ## notifications helpers ###
+    def get_model_scored_table_details(self) -> list[dict]:
+        """
+        Get the details of the tables that record the results of model scoring.
+        Return the model scored table details as a list of dictionaries with the following keys:
+        - table_name: the name of the table
+        - competition_col: the name of the competition column
+        - home_team_col: the name of the home team column
+        - away_team_col: the name of the away team column
+        - home_team_win_prob_col: the name of the home team win probability column
+        - point_diff_col: the name of the point difference column
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(sa.text("SELECT * FROM dbo.ModelScoredTableDetails"))
+                rows = result.mappings().all()
+                return rows
+        except Exception as e:
+            logger.error("Error getting model scored table details: %s", e)
+            raise
 
