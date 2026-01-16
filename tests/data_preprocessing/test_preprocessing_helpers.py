@@ -790,3 +790,269 @@ def test_add_international_features_maps_tier_and_hemisphere_and_is_non_destruct
     assert out.loc[1, "Home_Tier"] == 1
     assert pd.isna(out.loc[1, "Away_Tier"])
 
+
+### Tests for URC transformation functions ###
+
+# Does the transform_rugby365_results_data_to_urc_results function filter by competition and transform correctly?
+def test_transform_rugby365_results_data_to_urc_results_filters_and_transforms():
+    event = DummyPreprocessingEvent(integration_provider="rugby365", integration_type="results")
+    
+    # Create source data with multiple competitions
+    source = pd.DataFrame(
+        [
+            {
+                "match_date": "2025-01-15",
+                "home_team": "ulster",
+                "away_team": "leinster",
+                "home_score": 20,
+                "away_score": 18,
+                "competition_name": "United Rugby Championship",
+                "venue": "Ravenhill",
+            },
+            {
+                "match_date": "2025-01-14",
+                "home_team": "munster",
+                "away_team": "connacht",
+                "home_score": 25,
+                "away_score": 15,
+                "competition_name": "United Rugby Championship",
+                "venue": "Thomond Park",
+            },
+            {
+                "match_date": "2025-01-13",
+                "home_team": "france",
+                "away_team": "wales",
+                "home_score": 30,
+                "away_score": 20,
+                "competition_name": "Six Nations",  # Should be filtered out
+                "venue": "Stade de France",
+            },
+        ]
+    )
+
+    class FakeSqlClient:
+        def get_venue_database(self):
+            return pd.DataFrame(
+                [
+                    {"venue": "RAVENHILL", "city": "Belfast", "country": "Northern Ireland"},
+                    {"venue": "THOMOND PARK", "city": "Limerick", "country": "Ireland"},
+                    {"venue": "STADE DE FRANCE", "city": "Paris", "country": "France"},
+                ]
+            )
+
+    out = helpers.transform_rugby365_results_data_to_urc_results(source, event, FakeSqlClient())
+    
+    # Should only have 2 rows (URC matches)
+    assert len(out) == 2
+    assert out.loc[0, "HomeTeam"] == "ULSTER"
+    assert out.loc[0, "AwayTeam"] == "LEINSTER"
+    assert out.loc[0, "HomeScore"] == 20
+    assert out.loc[0, "AwayScore"] == 18
+    assert out.loc[0, "CompetitionName"] == "UNITED RUGBY CHAMPIONSHIP"
+    assert out.loc[0, "City"] == "BELFAST"
+    assert out.loc[0, "Country"] == "NORTHERN IRELAND"
+
+
+# Does the transform_rugby365_results_data_to_urc_results function return empty dataframe when no URC matches?
+def test_transform_rugby365_results_data_to_urc_results_empty_when_no_matches():
+    event = DummyPreprocessingEvent(integration_provider="rugby365", integration_type="results")
+    
+    source = pd.DataFrame(
+        [
+            {
+                "match_date": "2025-01-13",
+                "home_team": "france",
+                "away_team": "wales",
+                "home_score": 30,
+                "away_score": 20,
+                "competition_name": "Six Nations",
+                "venue": "Stade de France",
+            },
+        ]
+    )
+
+    class FakeSqlClient:
+        def read_table_to_dataframe(self, **kwargs):
+            return pd.DataFrame()
+
+    out = helpers.transform_rugby365_results_data_to_urc_results(source, event, FakeSqlClient())
+    assert out.empty
+
+
+# Does the transform_rugby365_fixtures_data_to_urc_fixtures function filter by competition and transform correctly?
+def test_transform_rugby365_fixtures_data_to_urc_fixtures_filters_and_transforms():
+    event = DummyPreprocessingEvent(integration_provider="rugby365", integration_type="fixtures")
+    
+    source = pd.DataFrame(
+        [
+            {
+                "match_date": "2025-02-15",
+                "kickoff_time_local": "3:00pm",
+                "home_team": "ulster",
+                "away_team": "leinster",
+                "competition_name": "United Rugby Championship",
+                "venue": "Ravenhill",
+            },
+            {
+                "match_date": "2025-02-16",
+                "kickoff_time_local": "7:00pm",
+                "home_team": "france",
+                "away_team": "wales",
+                "competition_name": "Six Nations",  # Should be filtered out
+                "venue": "Stade de France",
+            },
+        ]
+    )
+
+    class FakeSqlClient:
+        def get_venue_database(self):
+            return pd.DataFrame(
+                [
+                    {"venue": "RAVENHILL", "city": "Belfast", "country": "Northern Ireland"},
+                    {"venue": "STADE DE FRANCE", "city": "Paris", "country": "France"},
+                ]
+            )
+
+    out = helpers.transform_rugby365_fixtures_data_to_urc_fixtures(source, event, FakeSqlClient())
+    
+    # Should only have 1 row (URC fixture)
+    assert len(out) == 1
+    assert out.loc[0, "HomeTeam"] == "ULSTER"
+    assert out.loc[0, "AwayTeam"] == "LEINSTER"
+    assert out.loc[0, "CompetitionName"] == "UNITED RUGBY CHAMPIONSHIP"
+    assert out.loc[0, "City"] == "BELFAST"
+    assert pd.notna(out.loc[0, "KickoffTimeLocal"])
+
+
+# Does the transform_rugby365_fixtures_data_to_urc_fixtures function return empty dataframe when no URC fixtures?
+def test_transform_rugby365_fixtures_data_to_urc_fixtures_empty_when_no_matches():
+    event = DummyPreprocessingEvent(integration_provider="rugby365", integration_type="fixtures")
+    
+    source = pd.DataFrame(
+        [
+            {
+                "match_date": "2025-02-16",
+                "kickoff_time_local": "7:00pm",
+                "home_team": "france",
+                "away_team": "wales",
+                "competition_name": "Six Nations",
+                "venue": "Stade de France",
+            },
+        ]
+    )
+
+    class FakeSqlClient:
+        def read_table_to_dataframe(self, **kwargs):
+            return pd.DataFrame()
+
+    out = helpers.transform_rugby365_fixtures_data_to_urc_fixtures(source, event, FakeSqlClient())
+    assert out.empty
+
+
+# Does transform_urc_results_to_model_ready_data return empty dataframe when input is empty?
+def test_transform_urc_results_to_model_ready_data_empty_input_returns_empty():
+    event = DummyPreprocessingEvent(target_table="dbo.URCMatchResultsModelData")
+    
+    class FakeSqlClient:
+        pass
+
+    out = helpers.transform_urc_results_to_model_ready_data(pd.DataFrame(), event, FakeSqlClient())
+    assert out.empty
+
+
+# Does transform_urc_results_to_model_ready_data build model features correctly?
+def test_transform_urc_results_to_model_ready_data_builds_features():
+    event = DummyPreprocessingEvent(target_table="dbo.URCMatchResultsModelData")
+    
+    source = pd.DataFrame(
+        [
+            {
+                "ID": 1,
+                "MatchDate": pd.Timestamp("2024-01-01"),
+                "HomeTeam": "ULSTER",
+                "AwayTeam": "LEINSTER",
+                "HomeScore": 20,
+                "AwayScore": 18,
+                "CompetitionName": "UNITED RUGBY CHAMPIONSHIP",
+                "Venue": "RAVENHILL",
+                "City": "Belfast",
+                "Country": "Northern Ireland",
+                "CreatedAt": "2024-01-02",
+            },
+        ]
+    )
+
+    class FakeSqlClient:
+        def read_table_to_dataframe(self, *, table_name: str, columns=None, where_sql=None, params=None):
+            if table_name == "dbo.URCRugbyTeams":
+                return pd.DataFrame([{"TeamName": "ULSTER"}, {"TeamName": "LEINSTER"}])
+            elif table_name == "dbo.RugbyVenues":
+                return pd.DataFrame([{"VenueName": "RAVENHILL"}])
+            return pd.DataFrame()
+
+    out = helpers.transform_urc_results_to_model_ready_data(source, event, FakeSqlClient())
+    
+    assert len(out) == 1
+    assert out.loc[0, "HomeTeam"] == "ULSTER"
+    assert out.loc[0, "AwayTeam"] == "LEINSTER"
+    # Model should not have scores
+    assert "HomeScore" not in out.columns
+    assert "AwayScore" not in out.columns
+    # Model should have features
+    assert "Home_FormWinRate" in out.columns or "TimeDecayWeight" in out.columns
+
+
+# Does transform_urc_fixtures_to_model_ready_data return empty dataframe when input is empty?
+def test_transform_urc_fixtures_to_model_ready_data_empty_input_returns_empty():
+    event = DummyPreprocessingEvent(target_table="dbo.URCMatchFixturesModelData")
+    
+    class FakeSqlClient:
+        pass
+
+    out = helpers.transform_urc_fixtures_to_model_ready_data(pd.DataFrame(), event, FakeSqlClient())
+    assert out.empty
+
+
+# Does transform_urc_fixtures_to_model_ready_data build model features correctly?
+def test_transform_urc_fixtures_to_model_ready_data_builds_features():
+    event = DummyPreprocessingEvent(target_table="dbo.URCMatchFixturesModelData")
+    
+    source = pd.DataFrame(
+        [
+            {
+                "ID": 1,
+                "MatchDate": pd.Timestamp("2025-02-15"),
+                "KickoffTimeLocal": pd.Timestamp("2025-02-15 15:00:00"),
+                "HomeTeam": "ULSTER",
+                "AwayTeam": "LEINSTER",
+                "HomeScore": None,
+                "AwayScore": None,
+                "CompetitionName": "UNITED RUGBY CHAMPIONSHIP",
+                "Venue": "RAVENHILL",
+                "City": "Belfast",
+                "Country": "Northern Ireland",
+                "CreatedAt": "2025-02-14",
+            },
+        ]
+    )
+
+    class FakeSqlClient:
+        def read_table_to_dataframe(self, *, table_name: str, columns=None, where_sql=None, params=None):
+            if table_name == "dbo.URCRugbyTeams":
+                return pd.DataFrame([{"TeamName": "ULSTER"}, {"TeamName": "LEINSTER"}])
+            elif table_name == "dbo.RugbyVenues":
+                return pd.DataFrame([{"VenueName": "RAVENHILL"}])
+            elif table_name == "dbo.URCMatchResults":
+                return pd.DataFrame()  # No historical results
+            return pd.DataFrame()
+
+    out = helpers.transform_urc_fixtures_to_model_ready_data(source, event, FakeSqlClient())
+    
+    assert len(out) == 1
+    assert out.loc[0, "HomeTeam"] == "ULSTER"
+    assert out.loc[0, "AwayTeam"] == "LEINSTER"
+    # Fixtures model should not have scores
+    assert "HomeScore" not in out.columns
+    assert "AwayScore" not in out.columns
+    # Fixtures model should keep KickoffTimeLocal
+    assert pd.notna(out.loc[0, "KickoffTimeLocal"])

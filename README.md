@@ -42,6 +42,263 @@ This design pattern principality leaks into each stage of the design
 
 This allows us to implement variations of blueprints with new steps and variations of existing steps without having to interact with the overall orchestration flow or any existing working factory blueprints.
 
+---
+
+# Extending the System
+
+The architecture is designed so that new data sources, preprocessing pipelines, and models can be added with **minimal changes to existing code**. This section documents what stays the same and what needs to be added.
+
+## What Never Changes
+
+These components form the backbone and **require no modification** when adding new functionality:
+
+1. **The Event Tracking Layer** (`dbo.system_events`, `dbo.ingestion_events`, `dbo.preprocessing_events`)
+   - All new sources automatically use the same event tables.
+   - Status tracking and audit trails work identically for any new source.
+
+2. **The Orchestration Engines**
+   - `SelectIngestedSourcesStep`, `BuildPreprocessingPlansStep`, `PersistPreprocessingEventsStep`, `RunPreprocessingPipelinesStep` — these are generic and query metadata to discover work.
+   - They don't know or care whether you're ingesting Rugby365 or URC; they read the same `ingestion_events` table.
+
+3. **The Factory Pattern**
+   - Pipeline factories (`_default_preprocessing_factory`, etc.) remain unchanged.
+   - New pipelines are *registered* in existing registries, not added to orchestration logic.
+
+4. **The SQL Data Access Layer** (`functions/sql/sql_client.py`)
+   - Provides all CRUD operations needed by any stage.
+   - New sources use the same `SqlClient` methods; no SQL layer changes needed.
+
+## Adding a New Ingestion Source
+
+To ingest data from a completely new provider (e.g., football/soccer data from ESPN instead of rugby data from Rugby365):
+
+### 1. Create an ingestion function in `function_app.py`
+
+```python
+@app.function_name("IngestESPNFootballFixtures")
+@app.schedule(schedule="0 0 * * *")  # Daily at midnight
+def ingest_espn_football_fixtures(mytimer: functions.TimerRequest) -> None:
+    """Ingest football (soccer) fixtures from ESPN API."""
+    orchestrate_ingestion(
+        sql_client=sql_client,
+        system_event_id=uuid4(),
+        source_provider="espn",
+        source_type="fixtures",
+        pipeline_name="default_ingestion",
+    )
+```
+
+### 2. Implement the concrete integration in `functions/data_ingestion/integration_helpers.py`
+
+Create helper functions to fetch, validate, and write your data:
+
+```python
+def fetch_espn_football_fixtures_data() -> pd.DataFrame:
+    """Fetch football fixtures from ESPN API."""
+    # ... ESPN API call logic ...
+    return fixtures_df
+
+def validate_espn_football_fixtures_data(df: pd.DataFrame) -> None:
+    """Validate structure and required columns."""
+    # ... validation logic ...
+```
+
+### 3. Register the integration in `functions/data_ingestion/integration_services.py`
+
+Add your helper functions to the integration registry:
+
+```python
+INTEGRATION_REGISTRY = {
+    ("rugby365", "fixtures"): fetch_rugby365_fixtures_data,
+    ("rugby365", "results"): fetch_rugby365_results_data,
+    ("espn", "fixtures"): fetch_espn_football_fixtures_data,        # NEW
+    ("espn", "results"): fetch_espn_football_results_data,           # NEW
+}
+```
+
+### 4. Add schema metadata to SQL
+
+Insert rows into `dbo.schema_tables` and `dbo.schema_columns` describing your source structure:
+
+```sql
+INSERT INTO dbo.schema_tables (table_name, integration_provider, integration_type, is_source)
+VALUES ('ESPN Football Fixtures Raw', 'espn', 'fixtures', 1);
+
+INSERT INTO dbo.schema_columns (table_id, column_name, column_type, nullable, ...)
+VALUES (...);  -- One row per column
+```
+
+**That's it for ingestion.** The orchestration automatically:
+- Picks up your new `ingest_espn_football_fixtures` function at runtime.
+- Writes ingestion events to the same `ingestion_events` table.
+- Downstream preprocessing discovers work by querying that table.
+
+---
+
+## Adding a New Preprocessing Pipeline
+
+To transform data from a new sport/provider (or a new transformation of an existing source):
+
+### 1. Create the pipeline function in `functions/data_preprocessing/preprocessing_pipelines.py`
+
+```python
+def espn_football_fixtures_preprocessing_pipeline(preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> None:
+    """Preprocessing pipeline for ESPN football fixtures data."""
+    try:
+        source_data = get_source_data(preprocessing_event, sql_client)
+        if source_data.empty:
+            logger.warning("No source rows for event=%s; skipping.", preprocessing_event.id)
+            return
+        
+        source_schema = get_source_schema(preprocessing_event, sql_client)
+        target_schema = get_target_schema(preprocessing_event, sql_client)
+        validate_source_data(source_data, source_schema)
+        
+        # Transform using your new helper
+        transformed_data = transform_espn_football_fixtures_to_international_fixtures(source_data, preprocessing_event, sql_client)
+        
+        if transformed_data.empty:
+            logger.warning("No transformed rows for event=%s; skipping write.", preprocessing_event.id)
+            return
+        
+        validate_transformed_data(transformed_data, target_schema)
+        truncate_target_table(preprocessing_event, sql_client)
+        write_data_to_target_table(transformed_data, preprocessing_event, sql_client)
+    except Exception as e:
+        logger.error("Error running ESPN football fixtures preprocessing for event %s: %s", preprocessing_event.id, e)
+        raise
+```
+
+### 2. Implement transformation logic in `functions/data_preprocessing/preprocessing_helpers.py`
+
+```python
+def transform_espn_football_fixtures_to_international_fixtures(
+    source_data: pd.DataFrame,
+    preprocessing_event: "PreprocessingEvent",
+    sql_client: SqlClient,
+) -> pd.DataFrame:
+    """Convert ESPN football fixtures schema to a standardized fixtures schema."""
+    # ... transformation logic ...
+    return transformed_df
+```
+
+### 3. Register the pipeline in `PREPROCESSING_HANDLER_REGISTRY`
+
+```python
+PREPROCESSING_HANDLER_REGISTRY: dict[str, PreprocessingHandler] = {
+    # ... existing entries ...
+    "espn_football_fixtures_preprocessing": espn_football_fixtures_preprocessing_pipeline,  # NEW
+}
+```
+
+### 4. Add a source-to-target mapping in SQL
+
+Insert into `dbo.preprocessing_source_target_mappings`:
+
+```sql
+INSERT INTO dbo.preprocessing_source_target_mappings
+    (source_provider, source_type, target_table, pipeline_name, source_table, execution_order)
+VALUES
+    ('espn', 'fixtures', 'InternationalMatchFixtures', 'espn_football_fixtures_preprocessing', NULL, 1);
+```
+
+**That's it for preprocessing.** The orchestration automatically:
+- Queries `preprocessing_source_target_mappings` to discover which pipeline to run.
+- Creates `preprocessing_events` for each source matching your mapping.
+- Executes your pipeline via the registered handler.
+- No changes to `preprocessing_services.py` or the orchestration steps are needed.
+
+---
+
+## Adding a New Model
+
+To train a new model for a different sport or add a new scoring variant:
+
+### 1. Create model and trainer helpers in `functions/ml_models/helpers/`
+
+```python
+# model_factory.py
+def build_football_prediction_model() -> BaseEstimator:
+    """Factory to build a football-specific model."""
+    return XGBClassifier(...)
+
+# ml_training_helpers.py
+def train_football_model(X_train: pd.DataFrame, y_train: pd.Series) -> BaseEstimator:
+    """Train the football prediction model."""
+    model = build_football_prediction_model()
+    model.fit(X_train, y_train)
+    return model
+```
+
+### 2. Register in the model factory registry
+
+```python
+MODEL_REGISTRY = {
+    "international_match_home_win": build_international_match_home_win_model,
+    "football_match_prediction": build_football_prediction_model,  # NEW
+}
+```
+
+### 3. Create or update an `ml_pipeline` function in `functions/ml_models/ml_pipelines.py`
+
+```python
+def train_football_model_pipeline(ml_event: "MLEvent", sql_client: SqlClient) -> None:
+    """Training pipeline for football prediction model."""
+    # ... training logic ...
+```
+
+### 4. Register in SQL
+
+Insert into any model registry table (if you have one) or add configuration to `dbo.model_configuration`:
+
+```sql
+INSERT INTO dbo.model_configuration (model_name, status, ...)
+VALUES ('football_match_prediction', 'active', ...);
+```
+
+**Again, the orchestration engine** (`ml_orchestrator.py`) queries metadata tables to discover which models to train and score — no changes to the core orchestration needed.
+
+---
+
+## Design Pattern Payoffs
+
+This architecture's robustness comes from:
+
+1. **Metadata-Driven Discovery**
+   - Orchestration steps query config tables, not hard-coded lists.
+   - Add a row to `preprocessing_source_target_mappings`, and the system discovers your new pipeline automatically.
+
+2. **Pluggable Registries**
+   - Each layer has a registry (`PREPROCESSING_HANDLER_REGISTRY`, `INTEGRATION_REGISTRY`, `MODEL_REGISTRY`).
+   - Register your new handler/helper without modifying the orchestration that calls it.
+
+3. **Step-Based Orchestration**
+   - Each responsibility (discover sources → build plans → run pipelines) is isolated in a step.
+   - Adding a new source type doesn't require touching `RunPreprocessingPipelinesStep`.
+
+4. **Uniform Event Tracking**
+   - All sources, pipelines, and models use the same `system_events`, `ingestion_events`, `preprocessing_events` tables.
+   - No new tracking infrastructure needed for new functionality.
+
+5. **Centralised Data Access**
+   - `SqlClient` provides all CRUD operations.
+   - New integrations use the same SQL layer; no custom DB access code.
+
+---
+
+## Checklist: Adding a New Component
+
+When adding a **new data source, preprocessing pipeline, or model**, verify:
+
+- ✅ Implemented concrete helper functions (fetch, validate, transform, score, etc.)
+- ✅ Registered in the appropriate registry (`INTEGRATION_REGISTRY`, `PREPROCESSING_HANDLER_REGISTRY`, etc.)
+- ✅ Added metadata rows to SQL (`schema_tables`, `preprocessing_source_target_mappings`, etc.)
+- ✅ Added corresponding test file in `tests/` (following naming convention `test_<module>.py`)
+- ✅ No modifications to orchestration engines or factory methods
+- ✅ No new SQL tables (reuse event and metadata tables)
+
+---
+
 # Infrastructure Overview
 
 All resources are deployed into the following resource group:

@@ -113,6 +113,51 @@ def transform_rugby365_results_data_to_international_results(source_data: pd.Dat
         logger.error("Error transforming Rugby365 results data to international results for preprocessing event %s: %s", preprocessing_event.id, e)
         raise
 
+def transform_rugby365_results_data_to_urc_results(source_data: pd.DataFrame, preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> pd.DataFrame:
+    """
+    Transform the Rugby365 results data to URC results.
+    Filter the data to only include the competitions in the list and add city and country columns.
+    Rename the columns to the target schema.
+    """
+    try:
+        # get list of competitions
+        competition_name_list = [
+            "United Rugby Championship",
+        ]
+        # filter the data to only include the competitions in the list
+        df = source_data[source_data["competition_name"].isin(competition_name_list)].copy()
+        # drop duplicate rows
+        df = df.drop_duplicates()
+        # drop rows where any of the columns are NaN
+        df = drop_na_rows(df, columns=["match_date", "home_team", "away_team", "home_score", "away_score", "competition_name"])
+        # if there are no rows, return an empty dataframe
+        if df.empty:
+            logger.warning(
+                "No Rugby365 rows matched competition filter for preprocessing_event=%s",
+                preprocessing_event.id,
+            )
+            return pd.DataFrame()
+        # determine city and country from the venue and add to the dataframe
+        df = add_city_and_country_to_dataframe(df, sql_client, venue_column="venue", city_column="city", country_column="country")
+        # create a new dataframe to store the transformed data
+        transformed_data = pd.DataFrame(index=df.index)
+        # Keep MatchDate as a pandas datetime64 (normalised to date)
+        transformed_data["MatchDate"] = pd.to_datetime(df["match_date"], errors="coerce").dt.normalize()
+        transformed_data["HomeTeam"] = df["home_team"].str.upper()
+        transformed_data["AwayTeam"] = df["away_team"].str.upper()
+        transformed_data["HomeScore"] = df["home_score"].astype("Int64")
+        transformed_data["AwayScore"] = df["away_score"].astype("Int64")
+        transformed_data["CompetitionName"] = df["competition_name"].str.upper()
+        transformed_data["Venue"] = df["venue"].str.upper()
+        transformed_data["City"] = df["city"].str.upper()
+        transformed_data["Country"] = df["country"].str.upper()
+
+        transformed_data = transformed_data.reset_index(drop=True)
+        return transformed_data
+    except Exception as e:
+        logger.error("Error transforming Rugby365 results data to URC results for preprocessing event %s: %s", preprocessing_event.id, e)
+        raise
+
 def transform_rugby365_fixtures_data_to_international_fixtures(source_data: pd.DataFrame, preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> pd.DataFrame:
     """
     Transform the Rugby365 fixtures data to international fixtures.
@@ -167,6 +212,51 @@ def transform_rugby365_fixtures_data_to_international_fixtures(source_data: pd.D
         return transformed_data
     except Exception as e:
         logger.error("Error transforming Rugby365 fixtures data to international fixtures for preprocessing event %s: %s", preprocessing_event.id, e)
+        raise
+
+def transform_rugby365_fixtures_data_to_urc_fixtures(source_data: pd.DataFrame, preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> pd.DataFrame:
+    """
+    Transform the Rugby365 fixtures data to urc fixtures.
+    Filter the data to only include the competitions in the list and add city and country columns.
+    Rename the columns to the target schema.
+    """
+    try:
+        # get list of competitions
+        competition_name_list = [
+            "United Rugby Championship",
+        ]
+        # filter the data to only include the competitions in the list
+        df = source_data[source_data["competition_name"].isin(competition_name_list)].copy()
+        # drop duplicate rows
+        df = df.drop_duplicates()
+        # drop rows where any of the columns are NaN
+        df = drop_na_rows(df, columns=["kickoff_time_local", "match_date", "home_team", "away_team", "competition_name"])
+        # there are no rows that match the competition filter
+        if df.empty:
+            logger.warning(
+                "No Rugby365 fixtures rows matched competition filter for preprocessing_event=%s",
+                preprocessing_event.id,
+            )
+            return pd.DataFrame()
+        # parse the kickoff time and add to the dataframe
+        df = add_kickoff_datetime_from_date_and_time(df, date_column="match_date", time_column="kickoff_time_local", target_column="datetime_kickoff_time")
+        # determine city and country from the venue and add to the dataframe
+        df = add_city_and_country_to_dataframe(df, sql_client, venue_column="venue", city_column="city", country_column="country")
+        # create a new dataframe to store the transformed data
+        transformed_data = pd.DataFrame(index=df.index)
+        # rename the columns to the target schema
+        transformed_data["KickoffTimeLocal"] = df["datetime_kickoff_time"]
+        transformed_data["MatchDate"] = pd.to_datetime(df["match_date"], errors="coerce").dt.normalize()
+        transformed_data["HomeTeam"] = df["home_team"].str.upper()
+        transformed_data["AwayTeam"] = df["away_team"].str.upper()
+        transformed_data["CompetitionName"] = df["competition_name"].str.upper()
+        transformed_data["Venue"] = df["venue"].str.upper()
+        transformed_data["City"] = df["city"].str.upper()
+        transformed_data["Country"] = df["country"].str.upper()
+        transformed_data = transformed_data.reset_index(drop=True)
+        return transformed_data
+    except Exception as e:
+        logger.error("Error transforming Rugby365 fixtures data to urc fixtures for preprocessing event %s: %s", preprocessing_event.id, e)
         raise
 
 ## Model ready transformation functions ###
@@ -333,6 +423,171 @@ def transform_international_fixtures_to_model_ready_data(
 
     except Exception as e:
         logger.error("Error transforming international fixtures to model ready data: %s", e)
+        raise
+
+def transform_urc_fixtures_to_model_ready_data(
+    source_data: pd.DataFrame,
+    preprocessing_event: "PreprocessingEvent",    
+    sql_client: SqlClient,
+) -> pd.DataFrame:
+    """
+    Transform the URC fixtures data to model-ready data.
+    """
+    try:
+        fixtures_df = source_data.copy()
+        if fixtures_df.empty:
+            logger.warning("No URC fixtures rows for preprocessing_event=%s", preprocessing_event.id)
+            return pd.DataFrame()
+        
+        # Add the historical results to the fixtures to allow form computation
+        results_df = sql_client.read_table_to_dataframe(
+                table_name="dbo.URCMatchResults",
+                where_sql=None,
+                params= None,
+            )
+        
+        fixtures_df = pd.concat([fixtures_df, results_df], ignore_index=True)
+
+        # Drop audit columns
+        audit_cols = ["CreatedAt"]
+        fixtures_df = fixtures_df.drop(columns=[c for c in audit_cols if c in fixtures_df.columns], errors="ignore")
+
+        # Filter to canonical teams/venues
+        fixtures_df = team_name_standardization(
+            fixtures_df, sql_client,
+            table_name="dbo.URCRugbyTeams",
+            home_team_col="HomeTeam", away_team_col="AwayTeam",
+        )
+        fixtures_df = venue_standardisation(
+            fixtures_df, sql_client,
+            table_name="dbo.RugbyVenues",
+            venue_col="Venue",
+        )
+
+        # Add static international team features (Tier, Hemisphere, etc.)
+        fixtures_df = add_urc_features(fixtures_df, sql_client)
+
+        # Long format staging
+        team_long = to_team_match_long_format(
+            fixtures_df,
+            id_col="ID",
+            date_col="MatchDate",
+            home_team_col="HomeTeam",
+            away_team_col="AwayTeam",
+            home_score_col="HomeScore",
+            away_score_col="AwayScore",
+            # Include KickoffTimeLocal so we can deterministically order same-day fixtures
+            # after historical results when computing rolling form.
+            extra_context_cols=("KickoffTimeLocal", "CompetitionName", "Venue", "City", "Country"),
+        )
+
+        # Rolling team form
+        team_form_long = compute_rolling_team_form(team_long, form_window=10)
+
+        # Attach features back to matches (correct arg order)
+        model_base_df = attach_rolling_team_form_to_matches(fixtures_df, team_form_long)
+
+        # Compute the time decay weight (kept for parity with results model data).
+        model_base_df["TimeDecayWeight"] = time_decay_weight(
+            model_base_df,
+            date_col="MatchDate",
+            half_life_years=5.0,
+        )
+
+        # Don’t let the model see scores
+        model_base_df = model_base_df.drop(columns=["HomeScore", "AwayScore"])
+        # make sure columns are correct data types
+        model_base_df["MatchDate"] = pd.to_datetime(
+            model_base_df["MatchDate"],
+            errors="coerce"
+        ).dt.normalize()
+
+        # only return the fixtures rows
+        model_base_df = model_base_df[model_base_df["KickoffTimeLocal"].notna()].reset_index(drop=True)
+        return model_base_df
+
+    except Exception as e:
+        logger.error("Error transforming URC fixtures to model ready data: %s", e)
+        raise
+
+def transform_urc_results_to_model_ready_data(
+    source_data: pd.DataFrame,
+    preprocessing_event: "PreprocessingEvent",    
+    sql_client: SqlClient,
+) -> pd.DataFrame:
+    """
+    Transform the URC results data to model-ready data.
+    """
+    try:
+        results_df = source_data.copy()
+        if results_df.empty:
+            logger.warning("No URC results rows for preprocessing_event=%s", preprocessing_event.id)
+            return pd.DataFrame()
+
+        # Drop audit columns
+        audit_cols = ["CreatedAt"]
+        results_df = results_df.drop(columns=[c for c in audit_cols if c in results_df.columns], errors="ignore")
+
+        # Filter to canonical teams/venues
+        results_df = team_name_standardization(
+            results_df, sql_client,
+            table_name="dbo.URCRugbyTeams",
+            home_team_col="HomeTeam", away_team_col="AwayTeam",
+        )
+        results_df = venue_standardisation(
+            results_df, sql_client,
+            table_name="dbo.RugbyVenues",
+            venue_col="Venue",
+        )
+
+        # Add static international team features (Tier, Hemisphere, etc.)
+        results_df = add_urc_features(results_df, sql_client)
+
+        # Long format staging
+        team_long = to_team_match_long_format(
+            results_df,
+            id_col="ID",
+            date_col="MatchDate",
+            home_team_col="HomeTeam",
+            away_team_col="AwayTeam",
+            home_score_col="HomeScore",
+            away_score_col="AwayScore",
+            extra_context_cols=("CompetitionName", "Venue", "City", "Country"),
+        )
+
+        # Rolling team form
+        team_form_long = compute_rolling_team_form(team_long, form_window=10)
+
+        # Attach features back to matches (correct arg order)
+        model_base_df = attach_rolling_team_form_to_matches(results_df, team_form_long)
+
+        # Targets (drop null scores first)
+        model_base_df = model_base_df.dropna(subset=["HomeScore", "AwayScore"])
+        # compute the time decay weight
+        model_base_df["TimeDecayWeight"] = time_decay_weight(
+            model_base_df,
+            date_col="MatchDate",
+            half_life_years=5.0,
+        )
+        # add the match targets
+        model_base_df = add_match_targets(
+            model_base_df,
+            home_score_col="HomeScore",
+            away_score_col="AwayScore",
+            drop_draws=True,
+        )
+
+        # Don’t let the model see scores
+        model_base_df = model_base_df.drop(columns=["HomeScore", "AwayScore"])
+        # make sure columns are correct data types
+        model_base_df["MatchDate"] = pd.to_datetime(
+            model_base_df["MatchDate"],
+            errors="coerce"
+        ).dt.normalize()
+        return model_base_df
+
+    except Exception as e:
+        logger.error("Error transforming URC results to model ready data: %s", e)
         raise
 
 ### Validation functions ###
@@ -1065,6 +1320,52 @@ def add_international_features(
         logger.error("Error adding international features: %s", e)
         raise
 
+def add_urc_features(
+    df: pd.DataFrame,
+    sql_client: SqlClient,
+) -> pd.DataFrame:
+    """
+    Add URC team-level features (e.g. Hemisphere) for
+    HomeTeam and AwayTeam.
+
+    This is designed to be:
+      - case/whitespace insensitive
+      - non-destructive (nullable features; no row drops)
+      - expects dbo.URCRugbyTeams to contain TeamName, Hemisphere
+    """
+    try:
+        df = df.copy()
+
+        teams = sql_client.read_table_to_dataframe(
+            table_name="dbo.URCRugbyTeams",
+            columns=["TeamName", "Hemisphere"],
+        )
+
+        if teams.empty or "TeamName" not in teams.columns:
+            logger.warning("add_urc_features: dbo.URCRugbyTeams returned no rows; skipping.")
+            return df
+
+        teams = teams.copy()
+        teams["_team_key"] = teams["TeamName"].astype(str).str.upper().str.strip()
+        teams = teams.dropna(subset=["_team_key"]).drop_duplicates(subset=["_team_key"])
+
+        # Build lookups
+        hemisphere_lookup = None
+        if "Hemisphere" in teams.columns:
+            hemisphere_series = teams["Hemisphere"].astype(str).str.upper().str.strip()
+            hemisphere_lookup = pd.Series(hemisphere_series.values, index=teams["_team_key"])
+
+        home_key = df["HomeTeam"].astype(str).str.upper().str.strip()
+        away_key = df["AwayTeam"].astype(str).str.upper().str.strip()
+
+        if hemisphere_lookup is not None:
+            df["Home_Hemisphere"] = home_key.map(hemisphere_lookup)
+            df["Away_Hemisphere"] = away_key.map(hemisphere_lookup)
+
+        return df
+    except Exception as e:
+        logger.error("Error adding URC features: %s", e)
+        raise
 
 
 

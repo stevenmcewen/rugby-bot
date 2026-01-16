@@ -18,9 +18,13 @@ from functions.data_preprocessing.preprocessing_helpers import (
     validate_transformed_data,
     transform_kaggle_historical_data_to_international_results,
     transform_rugby365_results_data_to_international_results,
+    transform_rugby365_results_data_to_urc_results,
+    transform_rugby365_fixtures_data_to_urc_fixtures,
     transform_rugby365_fixtures_data_to_international_fixtures,
     transform_international_results_to_model_ready_data,
     transform_international_fixtures_to_model_ready_data,
+    transform_urc_results_to_model_ready_data,
+    transform_urc_fixtures_to_model_ready_data,
     truncate_target_table,
     write_data_to_target_table
 )
@@ -82,7 +86,7 @@ def historical_kaggle_international_results_preprocessing_pipeline(preprocessing
 
 def rugby365_international_results_preprocessing_pipeline(preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> None:
     """
-    Preprocessing pipeline for Rugby365 results data.
+    Preprocessing pipeline for Rugby365 results data for international matches.
     """
     try:
         # get the source data
@@ -117,9 +121,46 @@ def rugby365_international_results_preprocessing_pipeline(preprocessing_event: "
         logger.error("Error running Rugby365 results preprocessing pipeline for event %s: %s", preprocessing_event.id, e)
         raise
 
+def rugby365_urc_results_preprocessing_pipeline(preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> None:
+    """
+    Preprocessing pipeline for Rugby365 results data for URC matches.
+    """
+    try:
+        # get the source data
+        source_data = get_source_data(preprocessing_event, sql_client)
+        # if there are no source rows, return
+        if source_data.empty:
+            logger.warning(
+                "No source rows for preprocessing_event=%s; skipping preprocessing.",
+                preprocessing_event.id,
+            )
+            return
+        # get the source schema
+        source_schema = get_source_schema(preprocessing_event, sql_client)
+        # get the target schema
+        target_schema = get_target_schema(preprocessing_event, sql_client)
+        # validate the source data
+        validate_source_data(source_data, source_schema)
+        # transform the data
+        transformed_data = transform_rugby365_results_data_to_urc_results(source_data, preprocessing_event, sql_client)
+        # if there are no transformed rows, treat as a no-op (nothing new to write)
+        if transformed_data.empty:
+            logger.warning(
+                "No transformed Rugby365 results rows for preprocessing_event=%s; skipping write.",
+                preprocessing_event.id,
+            )
+            return
+        # validate the transformed data
+        validate_transformed_data(transformed_data, target_schema)
+        # write the data to the target table
+        write_data_to_target_table(transformed_data, preprocessing_event, sql_client)
+    except Exception as e:
+        logger.error("Error running Rugby365 results preprocessing pipeline for event %s: %s", preprocessing_event.id, e)
+        raise
+
 def rugby365_international_fixtures_preprocessing_pipeline(preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> None:
     """
-    Preprocessing pipeline for Rugby365 fixtures data.
+    Preprocessing pipeline for Rugby365 fixtures data for international matches.
     """
     try:
         # get the source data
@@ -156,6 +197,44 @@ def rugby365_international_fixtures_preprocessing_pipeline(preprocessing_event: 
         logger.error("Error running Rugby365 results preprocessing pipeline for event %s: %s", preprocessing_event.id, e)
         raise
 
+def rugby365_urc_fixtures_preprocessing_pipeline(preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> None:
+    """
+    Preprocessing pipeline for Rugby365 fixtures data for URC matches.
+    """
+    try:
+        # get the source data
+        source_data = get_source_data(preprocessing_event, sql_client)
+        # if there are no source rows, return
+        if source_data.empty:
+            logger.warning(
+                "No source rows for preprocessing_event=%s; skipping preprocessing.",
+                preprocessing_event.id,
+            )
+            return
+        # get the source schema
+        source_schema = get_source_schema(preprocessing_event, sql_client)
+        # get the target schema
+        target_schema = get_target_schema(preprocessing_event, sql_client)
+        # validate the source data
+        validate_source_data(source_data, source_schema)
+        # transform the data
+        transformed_data = transform_rugby365_fixtures_data_to_urc_fixtures(source_data, preprocessing_event, sql_client)
+        # if there are no transformed rows, treat as a no-op (nothing new to write)
+        if transformed_data.empty:
+            logger.warning(
+                "No transformed Rugby365 fixtures rows for preprocessing_event=%s; skipping write.",
+                preprocessing_event.id,
+            )
+            return
+        # validate the transformed data
+        validate_transformed_data(transformed_data, target_schema)
+        # truncate the target table
+        truncate_target_table(preprocessing_event, sql_client)
+        # write the data to the target table
+        write_data_to_target_table(transformed_data, preprocessing_event, sql_client)
+    except Exception as e:
+        logger.error("Error running Rugby365 results preprocessing pipeline for event %s: %s", preprocessing_event.id, e)
+        raise
 
 def international_results_to_model_ready_data_preprocessing_pipeline(preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> None:
     """
@@ -245,6 +324,94 @@ def international_fixtures_to_model_ready_data_preprocessing_pipeline(preprocess
         logger.error("Error building model-ready data for event %s: %s", preprocessing_event.id, e)
         raise
 
+def urc_results_to_model_ready_data_preprocessing_pipeline(preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> None:
+    """
+    Preprocessing pipeline for URCMatchResults -> URCMatchResultsModelData.
+
+    This is a "second layer" transformation:
+      - Reads the silver facts table from SQL
+      - Builds leakage-safe pre-kickoff features + target (home_win)
+      - Rebuilds the model table deterministically
+    """
+    try:
+        # get the source data
+        source_data = get_source_data(preprocessing_event, sql_client)
+        # if there are no source rows, return
+        if source_data.empty:
+            logger.warning(
+                "No source rows for preprocessing_event=%s; skipping preprocessing.",
+                preprocessing_event.id,
+            )
+            return
+        # get the source schema
+        source_schema = get_source_schema(preprocessing_event, sql_client)
+        # get the target schema
+        target_schema = get_target_schema(preprocessing_event, sql_client)
+        # validate the source data
+        validate_source_data(source_data, source_schema)
+        # transform the data
+        transformed_data = transform_urc_results_to_model_ready_data(source_data, preprocessing_event, sql_client)
+        # if there are no transformed rows, treat as a no-op (nothing new to write)
+        if transformed_data.empty:
+            logger.warning(
+                "No transformed URC results rows for preprocessing_event=%s; skipping write.",
+                preprocessing_event.id,
+            )
+            return
+        # validate the transformed data
+        validate_transformed_data(transformed_data, target_schema)
+        # truncate the target table
+        truncate_target_table(preprocessing_event, sql_client)
+        # write the data to the target table
+        write_data_to_target_table(transformed_data, preprocessing_event, sql_client)
+    except Exception as e:
+        logger.error("Error building model-ready data for event %s: %s", preprocessing_event.id, e)
+        raise
+
+def urc_fixtures_to_model_ready_data_preprocessing_pipeline(preprocessing_event: "PreprocessingEvent", sql_client: SqlClient) -> None:
+    """
+    Preprocessing pipeline for URCMatchFixtures -> URCMatchFixturesModelData.
+
+    This is a "second layer" transformation:
+      - Reads the silver facts table from SQL
+      - Builds leakage-safe pre-kickoff features + target (home_win)
+      - Rebuilds the model table deterministically
+    """
+    try:
+        # get the source data
+        source_data = get_source_data(preprocessing_event, sql_client)
+        # if there are no source rows, return
+        if source_data.empty:
+            logger.warning(
+                "No source rows for preprocessing_event=%s; skipping preprocessing.",
+                preprocessing_event.id,
+            )
+            return
+        # get the source schema
+        source_schema = get_source_schema(preprocessing_event, sql_client)
+        # get the target schema
+        target_schema = get_target_schema(preprocessing_event, sql_client)
+        # validate the source data
+        validate_source_data(source_data, source_schema)
+        # transform the data
+        transformed_data = transform_urc_fixtures_to_model_ready_data(source_data, preprocessing_event, sql_client)
+        # if there are no transformed rows, treat as a no-op (nothing new to write)
+        if transformed_data.empty:
+            logger.warning(
+                "No transformed URC fixtures rows for preprocessing_event=%s; skipping write.",
+                preprocessing_event.id,
+            )
+            return
+        # validate the transformed data
+        validate_transformed_data(transformed_data, target_schema)
+        # truncate the target table
+        truncate_target_table(preprocessing_event, sql_client)
+        # write the data to the target table
+        write_data_to_target_table(transformed_data, preprocessing_event, sql_client)
+    except Exception as e:
+        logger.error("Error building model-ready data for event %s: %s", preprocessing_event.id, e)
+        raise
+
 #### Preprocessing handler interface ####
 class PreprocessingHandler(Protocol):
     """
@@ -264,8 +431,12 @@ PREPROCESSING_HANDLER_REGISTRY: dict[str, PreprocessingHandler] = {
     "historical_kaggle_international_results_preprocessing": historical_kaggle_international_results_preprocessing_pipeline,
     "rugby365_international_results_preprocessing": rugby365_international_results_preprocessing_pipeline,
     "rugby365_international_fixtures_preprocessing": rugby365_international_fixtures_preprocessing_pipeline,
+    "rugby365_urc_results_preprocessing": rugby365_urc_results_preprocessing_pipeline,
+    "rugby365_urc_fixtures_preprocessing": rugby365_urc_fixtures_preprocessing_pipeline,
     "international_results_to_model_ready_data_preprocessing": international_results_to_model_ready_data_preprocessing_pipeline,
     "international_fixtures_to_model_ready_data_preprocessing": international_fixtures_to_model_ready_data_preprocessing_pipeline,
+    "urc_results_to_model_ready_data_preprocessing": urc_results_to_model_ready_data_preprocessing_pipeline,
+    "urc_fixtures_to_model_ready_data_preprocessing": urc_fixtures_to_model_ready_data_preprocessing_pipeline,
 }
 
 
