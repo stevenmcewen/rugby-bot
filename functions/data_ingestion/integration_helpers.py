@@ -360,7 +360,7 @@ def scrape_values_from_page_htmls_from_rugby365_for_dates(
         all_games.extend(page_games)
 
         # add a small delay so that we don't overwhelm the Rugby365 servers and get blocked
-        time.sleep(1)
+        time.sleep(0.5)
 
     # if there are no games, return an empty DataFrame
     if not all_games:
@@ -411,6 +411,9 @@ def scrape_values(
     if not last_ingestion_event_created_at:
         # Use a conservative bootstrap start date when nothing has been ingested yet.
         last_ingestion_event_created_at = datetime(2025, 10, 1)
+
+    # # if you want to refresh the database use this as the start date instead, comment out in production
+    # last_ingestion_event_created_at = datetime(2026, 1, 1)
 
     # get the scraping dates (inclusive range from last_ingestion_event_created_at to today)
     scraping_dates = to_date_range(last_ingestion_event_created_at.date(), today.date())
