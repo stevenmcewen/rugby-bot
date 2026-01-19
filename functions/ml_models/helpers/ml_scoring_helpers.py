@@ -27,6 +27,12 @@ def score_model(model_object: Any, X: pd.DataFrame) -> pd.Series:
     if X is None or not isinstance(X, pd.DataFrame):
         raise TypeError("score_model: X must be a pandas DataFrame")
 
+    # Convert string columns to categorical to be compatible with XGBoost
+    X = X.copy()
+    for col in X.columns:
+        if X[col].dtype == "object" or X[col].dtype == "string":
+            X[col] = X[col].astype("category")
+
     ## Predict Probabilities ##
     if hasattr(model_object, "predict_proba"):
         probabilities = model_object.predict_proba(X)

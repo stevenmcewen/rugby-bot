@@ -230,6 +230,43 @@ def TrainInternationalRugbyFixturesModelFunction(timer: func.TimerRequest) -> No
         raise
 
 @app.schedule(
+    schedule="0 30 8 * * 1", # 08:30 UTC every Monday
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def TrainURCRugbyFixturesModelFunction(timer: func.TimerRequest) -> None:
+    """
+    Train the urc rugby fixtures model.
+    """
+    logger.info("TrainURCRugbyFixturesModelFunction triggered.")
+    system_event = sql_client.start_system_event(
+        function_name="TrainURCRugbyFixturesModelFunction",
+        trigger_type="timer",
+        event_type="model_training",
+    )
+
+    try:
+        orchestrate_model_training(
+            sql_client=sql_client, 
+            system_event_id=system_event.id,
+            pipeline_name="default_model_training",
+            model_group_key="urc_rugby_fixtures",
+        )
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc: 
+        logger.exception("TrainURCRugbyFixturesModelFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
+
+@app.schedule(
     schedule="0 0 9 * * *", # 09:00 UTC daily
     arg_name="timer",
     run_on_startup=False,
@@ -259,6 +296,43 @@ def ScoreUpcomingInternationalRugbyFixturesFunction(timer: func.TimerRequest) ->
         )
     except Exception as exc: 
         logger.exception("ScoreUpcomingInternationalRugbyFixturesFunction failed.")
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="failed",
+            details=str(exc),
+        )
+        raise
+
+@app.schedule(
+    schedule="0 30 9 * * *", # 09:30 UTC daily
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def ScoreUpcomingURCRugbyFixturesFunction(timer: func.TimerRequest) -> None:
+    """
+    Score the upcoming URC rugby fixtures.
+    """
+    logger.info("ScoreUpcomingURCRugbyFixturesFunction triggered.")
+    system_event = sql_client.start_system_event(
+        function_name="ScoreUpcomingURCRugbyFixturesFunction",
+        trigger_type="timer",
+        event_type="model_scoring",
+    )
+
+    try:
+        orchestrate_model_scoring(
+            sql_client=sql_client, 
+            system_event_id=system_event.id,
+            pipeline_name="default_model_scoring",
+            model_group_key="urc_rugby_fixtures",
+        )
+        sql_client.complete_system_event(
+            system_event_id=system_event.id,
+            status="succeeded",
+        )
+    except Exception as exc: 
+        logger.exception("ScoreUpcomingURCRugbyFixturesFunction failed.")
         sql_client.complete_system_event(
             system_event_id=system_event.id,
             status="failed",
@@ -517,6 +591,60 @@ def DailyPredictionsNotificationFunction(timer: func.TimerRequest) -> None:
 #         )
 #         raise
 
+# # Train international rugby fixtures model.
+# @app.route(route="TrainURCRugbyFixturesModelFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
+# def TrainURCRugbyFixturesModelFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
+#     """
+#     Train international rugby fixtures model.
+#     """
+#     logger.info("TrainURCRugbyFixturesModelFunctionTest triggered.")
+#     system_event = sql_client.start_system_event(
+#         function_name="TrainURCRugbyFixturesModelFunctionTest",
+#         trigger_type="test",
+#         event_type="model_training",
+#     )
+#     try:
+#         orchestrate_model_training(
+#             sql_client=sql_client,
+#             system_event_id=system_event.id,
+#             pipeline_name="default_model_training",
+#             model_group_key="urc_rugby_fixtures",
+#         )
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="succeeded",
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "ok",
+#                     "message": "TrainURCRugbyFixturesModelFunctionTest triggered",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=200,
+#             mimetype="application/json",
+#         )
+#     except Exception as exc:
+#         logger.exception("TrainURCRugbyFixturesModelFunctionTest failed.")
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="failed",
+#             details=str(exc),
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "error",
+#                     "message": "TrainURCRugbyFixturesModelFunctionTest failed",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=500,
+#             mimetype="application/json",
+#         )
+#         raise
+
 # # Score upcoming international rugby fixtures.
 # @app.route(route="ScoreUpcomingInternationalRugbyFixturesFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
 # def ScoreUpcomingInternationalRugbyFixturesFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
@@ -570,6 +698,61 @@ def DailyPredictionsNotificationFunction(timer: func.TimerRequest) -> None:
 #             mimetype="application/json",
 #         )
 #         raise
+
+# # Score upcoming urc rugby fixtures.
+# @app.route(route="ScoreUpcomingURCRugbyFixturesFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
+# def ScoreUpcomingURCRugbyFixturesFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
+#     """
+#     Score upcoming urc rugby fixtures.
+#     """
+#     logger.info("ScoreUpcomingURCRugbyFixturesFunctionTest triggered.")
+#     system_event = sql_client.start_system_event(
+#         function_name="ScoreUpcomingURCRugbyFixturesFunctionTest",
+#         trigger_type="test",
+#         event_type="model_scoring",
+#     )
+#     try:
+#         orchestrate_model_scoring(
+#             sql_client=sql_client,
+#             system_event_id=system_event.id,
+#             pipeline_name="default_model_scoring",
+#             model_group_key="urc_rugby_fixtures",
+#         )
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="succeeded",
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "ok",
+#                     "message": "ScoreUpcomingURCRugbyFixturesFunctionTest triggered",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=200,
+#             mimetype="application/json",
+#         )
+#     except Exception as exc:
+#         logger.exception("ScoreUpcomingURCRugbyFixturesFunctionTest failed.")
+#         sql_client.complete_system_event(
+#             system_event_id=system_event.id,
+#             status="failed",
+#             details=str(exc),
+#         )
+#         return func.HttpResponse(
+#             json.dumps(
+#                 {
+#                     "status": "error",
+#                     "message": "ScoreUpcomingURCRugbyFixturesFunctionTest failed",
+#                     "system_event_id": str(system_event.id),
+#                 }
+#             ),
+#             status_code=500,
+#             mimetype="application/json",
+#         )
+#         raise
+
 # # Daily predictions notification test.
 # @app.route(route="DailyPredictionsNotificationFunctionTest", auth_level=func.AuthLevel.ANONYMOUS)
 # def DailyPredictionsNotificationFunctionTest(req: func.HttpRequest) -> func.HttpResponse:
