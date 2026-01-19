@@ -12,6 +12,8 @@ ModelBuilder = Callable[[dict], Any]
 MODEL_COMPATIBILITY: dict[str, Set[str]] = {
     "international_rugby_homewin_v1": {"classification"},
     "international_rugby_pointdiff_v1": {"regression"},
+    "urc_rugby_homewin_v1": {"classification"},
+    "urc_rugby_pointdiff_v1": {"regression"},
 }
 
 
@@ -45,6 +47,19 @@ def build_xgb_regressor(params: dict) -> Any:
     p.setdefault("tree_method", "hist")
     return XGBRegressor(**p)
 
+@register_model("urc_rugby_homewin_v1")
+def build_urc_xgb_classifier(params: dict) -> Any:
+    p = dict(params or {})
+    p.setdefault("enable_categorical", True)
+    p.setdefault("tree_method", "hist")
+    return XGBClassifier(**p)
+
+@register_model("urc_rugby_pointdiff_v1")
+def build_urc_xgb_regressor(params: dict) -> Any:
+    p = dict(params or {})
+    p.setdefault("enable_categorical", True)
+    p.setdefault("tree_method", "hist")
+    return XGBRegressor(**p)
 
 @dataclass(frozen=True)
 class ModelBuildContext:
