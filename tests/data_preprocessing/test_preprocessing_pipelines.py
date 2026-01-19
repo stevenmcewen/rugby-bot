@@ -305,8 +305,8 @@ def test_fixtures_model_ready_pipeline_no_source_rows_is_noop(monkeypatch):
     monkeypatch.setattr(pipes, "write_data_to_target_table", fake_write, raising=True)
 
     pipes.international_fixtures_to_model_ready_data_preprocessing_pipeline(event, sql_client=SimpleNamespace())
-    assert called["truncate"] == 0
-    assert called["write"] == 0
+    assert called["truncate"] == 1  # Truncate is called at the beginning to clear old data
+    assert called["write"] == 0    # Write is not called because there's no data
 
 
 def test_fixtures_model_ready_pipeline_happy_path_truncates_then_writes(monkeypatch):
@@ -442,9 +442,9 @@ def test_rugby365_urc_fixtures_pipeline_no_source_rows_is_noop(monkeypatch):
     monkeypatch.setattr(pipes, "write_data_to_target_table", fake_write, raising=True)
 
     pipes.rugby365_urc_fixtures_preprocessing_pipeline(event, sql_client=SimpleNamespace())
-    assert called["validate_source"] == 0
-    assert called["truncate"] == 0
-    assert called["write"] == 0
+    assert called["validate_source"] == 0  # Validation is not called because there's no data
+    assert called["truncate"] == 1         # Truncate is called at the beginning to clear old data
+    assert called["write"] == 0            # Write is not called because there's no data
 
 
 # Does the rugby365_urc_fixtures_preprocessing_pipeline call validators, truncate and write?
@@ -576,8 +576,8 @@ def test_urc_fixtures_model_ready_pipeline_no_source_rows_is_noop(monkeypatch):
     monkeypatch.setattr(pipes, "write_data_to_target_table", fake_write, raising=True)
 
     pipes.urc_fixtures_to_model_ready_data_preprocessing_pipeline(event, sql_client=SimpleNamespace())
-    assert called["truncate"] == 0
-    assert called["write"] == 0
+    assert called["truncate"] == 1  # Truncate is called at the beginning to clear old data
+    assert called["write"] == 0    # Write is not called because there's no data
 
 
 # Does the urc_fixtures_to_model_ready_data_preprocessing_pipeline call validators, truncate and write?

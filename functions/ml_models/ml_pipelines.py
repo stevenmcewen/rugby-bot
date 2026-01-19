@@ -537,6 +537,7 @@ class PrepareScoringContextStep:
       - validates presence of model_spec + data
       - resolves shared feature columns
       - pre-computes schema hash (feature-only)
+      - gracefully skips scoring if no data is available
     """
     def __call__(self, context: ModelContext) -> ModelContext:
         logger.info("Preparing scoring context")
@@ -549,6 +550,16 @@ class PrepareScoringContextStep:
             raise ValueError("PrepareScoringContextStep expected context['data'] as a pandas DataFrame")
         if not spec or not isinstance(spec, dict):
             raise ValueError("PrepareScoringContextStep expected context['model_specs'] as a dict spec bundle")
+
+        # If there's no data to score on, gracefully skip scoring
+        if data.empty:
+            logger.warning(
+                "No data available for scoring (model_group_key=%s); skipping scoring pipeline.",
+                context.get("model_group_key"),
+            )
+            context["status"] = "skipped"
+            context["skip_scoring"] = True
+            return context
 
         columns = spec.get("columns") or {}
         feature_columns: List[str] = columns.get("feature", []) or []
@@ -587,6 +598,11 @@ class LoadModelArtifactsStep:
     Load model artifacts from for each model in the spec.
     """
     def __call__(self, context: ModelContext) -> ModelContext:
+        # Skip if scoring was skipped due to no data
+        if context.get("skip_scoring"):
+            logger.info("Skipping model artifact loading (scoring was skipped)")
+            return context
+
         logger.info("Loading model artifacts")
 
         for model_spec in context["model_specs"].get("models", []):
@@ -622,6 +638,11 @@ class ScoreModelsStep:
     Score each loaded model against the shared features.
     """
     def __call__(self, context: ModelContext) -> ModelContext:
+        # Skip if scoring was skipped due to no data
+        if context.get("skip_scoring"):
+            logger.info("Skipping model scoring (no data available)")
+            return context
+
         logger.info("Scoring models")
 
         X_shared: pd.DataFrame = context.get("X_shared")
@@ -655,6 +676,12 @@ class CombineScoringResultsStep:
     """
 
     def __call__(self, context: ModelContext) -> ModelContext:
+        # Skip if scoring was skipped due to no data
+        if context.get("skip_scoring"):
+            logger.info("Skipping result combination (scoring was skipped)")
+            context["status"] = "skipped"
+            return context
+
         logger.info("Combining scoring results")
 
         data: pd.DataFrame = context.get("data")
@@ -692,6 +719,12 @@ class PersistScoringResultsStep:
     Persist the combined scoring results DataFrame to the results table in the sql database.
     """
     def __call__(self, context: ModelContext) -> ModelContext:
+        # Skip if scoring was skipped due to no data
+        if context.get("skip_scoring"):
+            logger.info("Skipping result persistence (scoring was skipped)")
+            context["status"] = "skipped"
+            return context
+
         logger.info("Persisting scoring results")
 
         model_specs: dict = context["model_specs"]

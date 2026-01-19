@@ -321,6 +321,19 @@ def test_prepare_scoring_context_raises_on_missing_columns():
         )
 
 
+def test_prepare_scoring_context_skips_when_data_is_empty():
+    """Verify that scoring is gracefully skipped when there's no fixture data."""
+    data = pd.DataFrame()  # Empty dataframe
+    ctx = {
+        "data": data,
+        "model_group_key": "fixtures",
+        "model_specs": {"columns": {"entity": ["ID"], "feature": ["F1"]}},
+    }
+    out = pipes.PrepareScoringContextStep()(ctx)
+    assert out["status"] == "skipped"
+    assert out["skip_scoring"] is True
+
+
 def test_load_model_artifacts_step_loads_each_enabled_model(monkeypatch):
     calls = {"loaded": []}
 
@@ -341,6 +354,22 @@ def test_load_model_artifacts_step_loads_each_enabled_model(monkeypatch):
     assert out["model_artifacts"]["m2"] == "artifact:models/m2.pkl"
 
 
+def test_load_model_artifacts_step_skips_when_skip_scoring_flag_is_set():
+    """Verify that artifact loading is skipped when scoring was skipped due to no data."""
+    class FakeSqlClient:
+        def get_latest_model_artifact_details(self, **kwargs):
+            raise AssertionError("should not be called when skip_scoring is True")
+
+    ctx = {
+        "skip_scoring": True,
+        "sql_client": FakeSqlClient(),
+        "model_specs": {"models": [{"model_key": "m1", "trainer_key": "t1"}]},
+    }
+    out = pipes.LoadModelArtifactsStep()(ctx)
+    assert out["skip_scoring"] is True
+    assert "model_artifacts" not in out  # Not created when skipped
+
+
 def test_score_models_step_scores_each_model_and_returns_context(monkeypatch):
     X = pd.DataFrame({"F": [1, 2]}, index=pd.Index([100, 200], name="ID"))
 
@@ -356,6 +385,18 @@ def test_score_models_step_scores_each_model_and_returns_context(monkeypatch):
     assert out["scoring_results"]["m1"].index.equals(X.index)
 
 
+def test_score_models_step_skips_when_skip_scoring_flag_is_set():
+    """Verify that scoring is skipped when skip_scoring flag is set."""
+    ctx = {
+        "skip_scoring": True,
+        "X_shared": pd.DataFrame(),
+        "model_artifacts": {"m1": object()},
+    }
+    out = pipes.ScoreModelsStep()(ctx)
+    assert out["skip_scoring"] is True
+    assert "scoring_results" not in out  # Not created when skipped
+
+
 def test_combine_scoring_results_step_builds_wide_dataframe():
     base = pd.DataFrame({"ID": [1, 2], "Other": [9, 9]}).set_index(["ID"], drop=False)
     s1 = pd.Series([0.1, 0.2], index=base.index, name="score")
@@ -369,6 +410,20 @@ def test_combine_scoring_results_step_builds_wide_dataframe():
     df = out["scored_df"]
     assert list(df.columns) == ["ID", "m1", "m2"]
     assert df["m1"].tolist() == [0.1, 0.2]
+
+
+def test_combine_scoring_results_step_skips_when_skip_scoring_flag_is_set():
+    """Verify that result combining is skipped when skip_scoring flag is set."""
+    ctx = {
+        "skip_scoring": True,
+        "data": pd.DataFrame({"ID": [1, 2]}),
+        "resolved_entity_columns": ["ID"],
+        "scoring_results": {"m1": pd.Series([0.1, 0.2])},
+    }
+    out = pipes.CombineScoringResultsStep()(ctx)
+    assert out["status"] == "skipped"
+    assert out["skip_scoring"] is True
+    assert "scored_df" not in out  # Not created when skipped
 
 
 def test_persist_scoring_results_step_adds_metadata_validates_and_writes(monkeypatch):
@@ -438,4 +493,26 @@ def test_persist_scoring_results_step_adds_metadata_validates_and_writes(monkeyp
             "ModelGroupKey": True,
         },
     }
+
+
+def test_persist_scoring_results_step_skips_when_skip_scoring_flag_is_set():
+    """Verify that result persistence is skipped when skip_scoring flag is set."""
+    class FakeSqlClient:
+        def get_schema(self, **kwargs):
+            raise AssertionError("should not be called when skip_scoring is True")
+
+        def write_dataframe_to_table(self, **kwargs):
+            raise AssertionError("should not be called when skip_scoring is True")
+
+    ctx = {
+        "skip_scoring": True,
+        "sql_client": FakeSqlClient(),
+        "system_event_id": "sys",
+        "model_group_key": "group",
+        "model_specs": {"results_table_name": "dbo.Results"},
+        "scored_df": pd.DataFrame({"ID": [1, 2], "m1": [0.1, 0.2]}),
+    }
+    out = pipes.PersistScoringResultsStep()(ctx)
+    assert out["status"] == "skipped"
+    assert out["skip_scoring"] is True
 
