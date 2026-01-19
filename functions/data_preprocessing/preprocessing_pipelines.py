@@ -163,6 +163,8 @@ def rugby365_international_fixtures_preprocessing_pipeline(preprocessing_event: 
     Preprocessing pipeline for Rugby365 fixtures data for international matches.
     """
     try:
+        # truncate the target table (always, even if there's no source data)
+        truncate_target_table(preprocessing_event, sql_client)
         # get the source data
         source_data = get_source_data(preprocessing_event, sql_client)
         # if there are no source rows, return
@@ -189,8 +191,6 @@ def rugby365_international_fixtures_preprocessing_pipeline(preprocessing_event: 
             return
         # validate the transformed data
         validate_transformed_data(transformed_data, target_schema)
-        # truncate the target table
-        truncate_target_table(preprocessing_event, sql_client)
         # write the data to the target table
         write_data_to_target_table(transformed_data, preprocessing_event, sql_client)
     except Exception as e:
@@ -202,6 +202,8 @@ def rugby365_urc_fixtures_preprocessing_pipeline(preprocessing_event: "Preproces
     Preprocessing pipeline for Rugby365 fixtures data for URC matches.
     """
     try:
+        # truncate the target table (always, even if there's no source data)
+        truncate_target_table(preprocessing_event, sql_client)
         # get the source data
         source_data = get_source_data(preprocessing_event, sql_client)
         # if there are no source rows, return
@@ -228,8 +230,6 @@ def rugby365_urc_fixtures_preprocessing_pipeline(preprocessing_event: "Preproces
             return
         # validate the transformed data
         validate_transformed_data(transformed_data, target_schema)
-        # truncate the target table
-        truncate_target_table(preprocessing_event, sql_client)
         # write the data to the target table
         write_data_to_target_table(transformed_data, preprocessing_event, sql_client)
     except Exception as e:
@@ -290,6 +290,8 @@ def international_fixtures_to_model_ready_data_preprocessing_pipeline(preprocess
       - Rebuilds the model table deterministically
     """
     try:
+        # truncate the target table (always, even if there's no source data)
+        truncate_target_table(preprocessing_event, sql_client)
         # get the source data
         source_data = get_source_data(preprocessing_event, sql_client)
         # if there are no source rows, return
@@ -316,8 +318,6 @@ def international_fixtures_to_model_ready_data_preprocessing_pipeline(preprocess
             return
         # validate the transformed data
         validate_transformed_data(transformed_data, target_schema)
-        # truncate the target table
-        truncate_target_table(preprocessing_event, sql_client)
         # write the data to the target table
         write_data_to_target_table(transformed_data, preprocessing_event, sql_client)
     except Exception as e:
@@ -378,6 +378,8 @@ def urc_fixtures_to_model_ready_data_preprocessing_pipeline(preprocessing_event:
       - Rebuilds the model table deterministically
     """
     try:
+        # truncate the target table (always, even if there's no source data)
+        truncate_target_table(preprocessing_event, sql_client)
         # get the source data
         source_data = get_source_data(preprocessing_event, sql_client)
         # if there are no source rows, return
@@ -404,8 +406,6 @@ def urc_fixtures_to_model_ready_data_preprocessing_pipeline(preprocessing_event:
             return
         # validate the transformed data
         validate_transformed_data(transformed_data, target_schema)
-        # truncate the target table
-        truncate_target_table(preprocessing_event, sql_client)
         # write the data to the target table
         write_data_to_target_table(transformed_data, preprocessing_event, sql_client)
     except Exception as e:
