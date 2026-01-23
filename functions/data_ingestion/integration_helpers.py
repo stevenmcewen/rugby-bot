@@ -300,6 +300,12 @@ def parse_rugby365_games_from_html(
                     # if there is a 'g' parameter value, set the match_id
                     if g_vals:
                         match_id = g_vals[0]
+                # For fixtures, exclude completed matches (FT = Full Time)
+                # Rugby365's fixtures page sometimes shows past completed matches
+                # which should not be included in fixtures data
+                if integration_type == "fixtures" and state == "FT":
+                    continue
+                
                 # add the game to the results list
                 results.append(
                     {
@@ -368,6 +374,11 @@ def scrape_values_from_page_htmls_from_rugby365_for_dates(
 
     # convert the all_games list to a pandas DataFrame
     scraped_df = pd.DataFrame(all_games)
+    
+    # Deduplicate by match_id - Rugby365 shows the same matches across multiple date queries
+    # Keep the first occurrence of each match_id
+    if not scraped_df.empty and 'match_id' in scraped_df.columns:
+        scraped_df = scraped_df.drop_duplicates(subset=['match_id'], keep='first')
 
     return scraped_df
 

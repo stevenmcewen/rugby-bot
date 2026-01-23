@@ -430,6 +430,9 @@ def test_persist_scoring_results_step_adds_metadata_validates_and_writes(monkeyp
     captured = {}
 
     class FakeSqlClient:
+        def truncate_table(self, *, table_name: str):
+            captured["truncate_table"] = table_name
+
         def get_schema(self, *, table_name: str):
             captured["schema_table"] = table_name
             # Must match the real SqlClient.get_schema() contract, as the step builds a schema_dict
@@ -465,6 +468,8 @@ def test_persist_scoring_results_step_adds_metadata_validates_and_writes(monkeyp
 
     out = pipes.PersistScoringResultsStep()(ctx)
     assert out["status"] == "persisted"
+    # Verify truncate was called before writing
+    assert captured["truncate_table"] == "dbo.Results"
     assert captured["schema_table"] == "dbo.Results"
     assert captured["table_name"] == "dbo.Results"
     assert captured["if_exists"] == "append"
@@ -496,13 +501,19 @@ def test_persist_scoring_results_step_adds_metadata_validates_and_writes(monkeyp
 
 
 def test_persist_scoring_results_step_skips_when_skip_scoring_flag_is_set():
-    """Verify that result persistence is skipped when skip_scoring flag is set."""
+    """Verify that table is still truncated even when skip_scoring flag is set."""
+    truncate_called = {"called": False, "table": None}
+
     class FakeSqlClient:
+        def truncate_table(self, *, table_name: str):
+            truncate_called["called"] = True
+            truncate_called["table"] = table_name
+
         def get_schema(self, **kwargs):
-            raise AssertionError("should not be called when skip_scoring is True")
+            raise AssertionError("get_schema should not be called when skip_scoring is True")
 
         def write_dataframe_to_table(self, **kwargs):
-            raise AssertionError("should not be called when skip_scoring is True")
+            raise AssertionError("write_dataframe_to_table should not be called when skip_scoring is True")
 
     ctx = {
         "skip_scoring": True,
@@ -515,4 +526,7 @@ def test_persist_scoring_results_step_skips_when_skip_scoring_flag_is_set():
     out = pipes.PersistScoringResultsStep()(ctx)
     assert out["status"] == "skipped"
     assert out["skip_scoring"] is True
+    # Verify truncate was still called to clear stale predictions
+    assert truncate_called["called"] is True
+    assert truncate_called["table"] == "dbo.Results"
 

@@ -719,26 +719,31 @@ class PersistScoringResultsStep:
     Persist the combined scoring results DataFrame to the results table in the sql database.
     """
     def __call__(self, context: ModelContext) -> ModelContext:
+        model_specs: dict = context["model_specs"]
+        sql_client: SqlClient = context["sql_client"]
+        system_event_id = context["system_event_id"]
+        model_group_key = context["model_group_key"]
+        
+        results_table_name = model_specs.get("results_table_name")
+        if not results_table_name:
+            raise ValueError("Model spec missing 'results_table_name' for persisting scoring results")
+
+        # Always truncate the results table first, even if there's no data to score
+        # This prevents stale predictions from previous runs being shown when there are no fixtures today
+        sql_client.truncate_table(table_name=results_table_name)
+        logger.info("Truncated table %s", results_table_name)
+
         # Skip if scoring was skipped due to no data
         if context.get("skip_scoring"):
-            logger.info("Skipping result persistence (scoring was skipped)")
+            logger.info("No scoring data available; table cleared but no new results to persist")
             context["status"] = "skipped"
             return context
 
         logger.info("Persisting scoring results")
 
-        model_specs: dict = context["model_specs"]
-        sql_client: SqlClient = context["sql_client"]
-        system_event_id = context["system_event_id"]
-        model_group_key = context["model_group_key"]
-
         scored_df = context.get("scored_df")
         if scored_df is None or not isinstance(scored_df, pd.DataFrame):
             raise ValueError("PersistScoringResultsStep expected context['scored_df'] as a pandas DataFrame")
-        
-        results_table_name = model_specs.get("results_table_name")
-        if not results_table_name:
-            raise ValueError("Model spec missing 'results_table_name' for persisting scoring results")
 
         logger.info("Persisting results for model_group_key=%s", model_group_key)
 

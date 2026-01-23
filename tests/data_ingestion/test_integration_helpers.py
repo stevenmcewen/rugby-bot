@@ -226,6 +226,77 @@ def test_parse_rugby365_games_from_html_no_games_section():
     assert games == []
 
 
+def test_parse_rugby365_games_from_html_filters_completed_matches_for_fixtures_only():
+    """
+    parse_rugby365_games_from_html
+    - must filter out completed matches (state="FT") when integration_type="fixtures"
+    - must NOT filter completed matches when integration_type="results"
+    """
+    target_date = date(2025, 12, 8)
+    scraping_dates_set = {datetime.combine(target_date, datetime.min.time())}
+
+    html = """
+    <section class="games-list">
+      <div class="games-list-item">
+        <div class="date">Mon Dec 08, 2025</div>
+        <div class="comp" data-id="comp-123">
+          <h2>URC</h2>
+          <div class="games">
+            <div class="game">
+              <div class="time">
+                <div class="state">FT</div>
+                <div class="venue">Cape Town Stadium</div>
+              </div>
+              <div class="logo home"><img alt="Stormers"/></div>
+              <div class="logo away"><img alt="Leinster"/></div>
+              <div class="game-time">19:00</div>
+              <div class="round">Round 5</div>
+              <div class="live-note">Full time</div>
+              <div class="score home">20</div>
+              <div class="score away">18</div>
+              <a class="link-box" href="https://rugby365.com/match?g=1234"></a>
+            </div>
+            <div class="game">
+              <div class="time">
+                <div class="state">8:00pm</div>
+                <div class="venue">Cape Town Stadium</div>
+              </div>
+              <div class="logo home"><img alt="Bulls"/></div>
+              <div class="logo away"><img alt="Sharks"/></div>
+              <div class="game-time">8:00pm</div>
+              <div class="round">Round 6</div>
+              <div class="score home">0</div>
+              <div class="score away">0</div>
+              <a class="link-box" href="https://rugby365.com/match?g=5678"></a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+    """
+
+    # For fixtures, completed matches should be filtered out
+    games_fixtures = helpers.parse_rugby365_games_from_html(
+        html=html,
+        scraping_dates_set=scraping_dates_set,
+        integration_type="fixtures",
+    )
+    assert len(games_fixtures) == 1
+    assert games_fixtures[0]["home_team"] == "Bulls"
+    assert games_fixtures[0]["state"] == "8:00pm"
+
+    # For results, completed matches should be included
+    games_results = helpers.parse_rugby365_games_from_html(
+        html=html,
+        scraping_dates_set=scraping_dates_set,
+        integration_type="results",
+    )
+    assert len(games_results) == 2
+    assert games_results[0]["home_team"] == "Stormers"
+    assert games_results[0]["state"] == "FT"
+    assert games_results[1]["home_team"] == "Bulls"
+
+
 ## Rugby365 scrape orchestration #############################################
 
 def test_scrape_values_from_page_htmls_from_rugby365_for_dates_happy_path(monkeypatch):
