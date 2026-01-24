@@ -193,7 +193,7 @@ def PreprocessDataFunction(timer: func.TimerRequest) -> None:
         raise
 
 @app.schedule(
-    schedule="0 0 8 * * 1", # 08:00 UTC every Monday
+    schedule="0 0 4 * * 1", # 04:00 UTC every Monday
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
@@ -230,7 +230,7 @@ def TrainInternationalRugbyFixturesModelFunction(timer: func.TimerRequest) -> No
         raise
 
 @app.schedule(
-    schedule="0 30 8 * * 1", # 08:30 UTC every Monday
+    schedule="0 30 4 * * 1", # 04:30 UTC every Monday
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
@@ -267,7 +267,7 @@ def TrainURCRugbyFixturesModelFunction(timer: func.TimerRequest) -> None:
         raise
 
 @app.schedule(
-    schedule="0 0 9 * * *", # 09:00 UTC daily
+    schedule="0 0 6 * * *", # 06:00 UTC daily
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
@@ -304,7 +304,7 @@ def ScoreUpcomingInternationalRugbyFixturesFunction(timer: func.TimerRequest) ->
         raise
 
 @app.schedule(
-    schedule="0 30 9 * * *", # 09:30 UTC daily
+    schedule="0 30 6 * * *", # 06:30 UTC daily
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
@@ -341,7 +341,7 @@ def ScoreUpcomingURCRugbyFixturesFunction(timer: func.TimerRequest) -> None:
         raise
 
 @app.schedule(
-    schedule="0 0 10 * * *", # 10:00 UTC daily
+    schedule="0 30 7 * * *", # 7:30 UTC daily
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
