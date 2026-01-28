@@ -290,12 +290,12 @@ This architecture's robustness comes from:
 
 When adding a **new data source, preprocessing pipeline, or model**, verify:
 
-- ✅ Implemented concrete helper functions (fetch, validate, transform, score, etc.)
-- ✅ Registered in the appropriate registry (`INTEGRATION_REGISTRY`, `PREPROCESSING_HANDLER_REGISTRY`, etc.)
-- ✅ Added metadata rows to SQL (`schema_tables`, `preprocessing_source_target_mappings`, etc.)
-- ✅ Added corresponding test file in `tests/` (following naming convention `test_<module>.py`)
-- ✅ No modifications to orchestration engines or factory methods
-- ✅ No new SQL tables (reuse event and metadata tables)
+-  Implemented concrete helper functions (fetch, validate, transform, score, etc.)
+-  Registered in the appropriate registry (`INTEGRATION_REGISTRY`, `PREPROCESSING_HANDLER_REGISTRY`, etc.)
+-  Added metadata rows to SQL (`schema_tables`, `preprocessing_source_target_mappings`, etc.)
+-  Added corresponding test file in `tests/` (following naming convention `test_<module>.py`)
+-  No modifications to orchestration engines or factory methods
+-  No new SQL tables (reuse event and metadata tables)
 
 ---
 
